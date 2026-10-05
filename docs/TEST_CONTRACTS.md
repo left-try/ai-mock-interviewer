@@ -43,6 +43,9 @@ Calls are asynchronous. Invalid user input raises `ValueError` or a documented a
 - The voice host records every finalized candidate answer through `record_candidate_answer` before asking another question. Each answer has a distinct idempotency key; a retry reuses the same key and cannot duplicate the answer.
 - The active Backend Internship HR interview covers motivation, education, project experience, personal contribution, teamwork, a challenge, reflection, and expectations. The normal target is 8–10 candidate answers.
 - The host follows deterministic `interview_progress` and `next_action` fields returned by MCP. It must announce completion itself when directed, then request the report without inventing an extra unanswered question.
+- `record_candidate_answer` supports a compact voice mode that returns only the latest saved answer, the next interviewer turn, and progress. It does not resend the full transcript on each turn.
+- If a finalized transcript tail arrives after the session enters `awaiting_report` but before report creation, it is appended exactly once and included in the report. A completed report remains immutable.
+- The host announces a completed interview only after `finish_interview` succeeds; a failed report call cannot be described as a finished report.
 - If the candidate stops early or the maximum answer count is reached with uncovered topics, the report must preserve those gaps as uncertainty.
 - These host/MCP behaviors are covered by `tests/test_voice_interview_workflow.py`; this supplements the service contracts above without changing existing assertions.
 

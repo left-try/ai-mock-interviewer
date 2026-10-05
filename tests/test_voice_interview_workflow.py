@@ -28,6 +28,7 @@ def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
     assert "every finalized candidate answer" in instructions.lower()
     assert "next_action" in instructions
     assert "finish_interview" in instructions
+    assert "include_transcript=false" in instructions
 
 
 async def test_interview_progress_requires_topic_coverage_and_at_least_eight_answers():
@@ -160,5 +161,145 @@ async def test_mcp_logs_each_answer_then_signals_finish_after_full_topic_coverag
         assert completed["status"] == "completed"
         assert completed["interview_complete"] is True
         assert "интервью завершено" in completed["instruction"].lower()
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_mcp_accepts_final_transcript_tail_before_report_is_created():
+    bridge, _ = _voice_modules()
+    topics = ["education", "project", "personal_contribution", "teamwork", "challenge", "reflection", "expectations"]
+    started = await bridge.start_interview(
+        resume_text="Студент, опыт backend-проектов.",
+        first_turn_json=json.dumps(next_question("motivation", "Почему backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        for index in range(8):
+            await bridge.record_candidate_answer(
+                session_id=session_id,
+                transcript=f"Ответ {index + 1}",
+                event_id=f"answer-{index + 1}",
+                next_turn_json=(
+                    json.dumps(next_question(topics[index], f"Вопрос {index + 1}"))
+                    if index < len(topics)
+                    else ""
+                ),
+            )
+
+        late = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="И ещё я хочу попробовать разработать полноценный API.",
+            event_id="transcript-tail-1",
+        )
+
+        assert late["ok"] is True
+        assert late["status"] == "awaiting_report"
+        assert late["interview_progress"]["candidate_answers"] == 9
+        assert late["next_action"] == "finish_interview"
+        assert late["candidate_turn"]["text"] == "И ещё я хочу попробовать разработать полноценный API."
+
+        duplicate = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="И ещё я хочу попробовать разработать полноценный API.",
+            event_id="transcript-tail-1",
+        )
+        assert duplicate["duplicate"] is True
+        assert duplicate["interview_progress"]["candidate_answers"] == 9
+
+        completed = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [],
+                    "uncertainties": ["Учебный прогон; в этом тесте оценка не формируется."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+        assert completed["status"] == "completed"
+        assert "turns" not in completed
+        final_status = await bridge.interview_status(session_id=session_id)
+        assert final_status["interview_progress"]["candidate_answers"] == 9
+        assert final_status["turns"][-1]["text"] == "И ещё я хочу попробовать разработать полноценный API."
+
+        too_late = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Это уже после готового отчёта.",
+            event_id="post-report-answer",
+        )
+        assert too_late["ok"] is False
+        assert "no longer accepts" in too_late["error"]
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_compact_voice_response_returns_only_new_turns_and_progress():
+    bridge, _ = _voice_modules()
+    started = await bridge.start_interview(
+        resume_text="Студент, учебный backend-проект.",
+        first_turn_json=json.dumps(next_question("motivation", "Почему backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend-навыки.",
+            event_id="compact-answer-1",
+            next_turn_json=json.dumps(next_question("education", "Что изучали?")),
+            include_transcript=False,
+        )
+
+        assert result["ok"] is True
+        assert "turns" not in result
+        assert result["candidate_turn"]["text"] == "Хочу развивать backend-навыки."
+        assert result["next_turn"]["text"] == "Что изучали?"
+        assert result["interview_progress"]["candidate_answers"] == 1
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_report_error_names_unknown_evidence_criterion_for_repair():
+    bridge, _ = _voice_modules()
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "mixed_signal",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [
+                        {
+                            "criterion": "expectations",
+                            "source_turn_id": "resume",
+                            "quote": "Student backend project",
+                            "observation": "The resume mentions a project.",
+                        }
+                    ],
+                    "uncertainties": [],
+                    "disclaimer": "Training practice feedback.",
+                }
+            ),
+        )
+
+        assert result["ok"] is False
+        assert "expectations" in result["error"]
+        assert "Allowed criteria" in result["error"]
     finally:
         await bridge.delete_interview(session_id)
