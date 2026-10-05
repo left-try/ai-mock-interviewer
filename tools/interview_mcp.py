@@ -54,14 +54,25 @@ def _decode(value: str, field: str) -> dict:
 
 
 def _public_turn(turn):
-    return {"role": turn.role, "text": turn.text, "topic": turn.topic_id, "kind": turn.kind}
+    return {"id": turn.id, "role": turn.role, "text": turn.text, "topic": turn.topic_id, "kind": turn.kind}
 
 
-def _public_session(session):
-    return {
+def _public_delta(session, *, include_transcript=False):
+    candidate = next((turn for turn in reversed(session.turns) if turn.role == "candidate"), None)
+    latest = session.turns[-1] if session.turns else None
+    result = {
+        "candidate_turn": None if candidate is None else _public_turn(candidate),
+        "next_turn": _public_turn(latest) if latest is not None and latest.role == "interviewer" else None,
+    }
+    if include_transcript:
+        result["turns"] = [_public_turn(turn) for turn in session.turns]
+    return result
+
+
+def _public_session(session, *, include_transcript=True):
+    result = {
         "session_id": session.id,
         "status": session.status,
-        "turns": [_public_turn(turn) for turn in session.turns],
         "interview_progress": interview_progress(session.turns),
         "report": None if session.report is None else {
             "recommendation": session.report.recommendation,
@@ -73,6 +84,9 @@ def _public_session(session):
             "disclaimer": session.report.disclaimer,
         },
     }
+    if include_transcript:
+        result["turns"] = [_public_turn(turn) for turn in session.turns]
+    return result
 
 
 def _next_action(session, progress):
@@ -115,6 +129,7 @@ async def record_candidate_answer(
     transcript: str,
     event_id: str,
     next_turn_json: str = "",
+    include_transcript: bool = True,
 ) -> dict:
     """Record one finalized answer; the result says whether to ask another question or finish."""
     try:
@@ -128,13 +143,39 @@ async def record_candidate_answer(
             previous = await service.get_event_result(session_id, event_id)
             if previous is not None:
                 prior_progress = interview_progress(previous.turns)
-                return {
+                result = {
                     "ok": True,
                     "duplicate": True,
-                    **_public_session(previous),
                     "next_action": _next_action(previous, prior_progress),
+                    "interview_progress": prior_progress,
                 }
+                result.update(_public_delta(previous, include_transcript=include_transcript))
+                if include_transcript:
+                    result.update(_public_session(previous))
+                return result
             before = await service.get_session(session_id)
+            if before.status == "awaiting_report":
+                session = await service.submit_answer(
+                    session_id,
+                    transcript,
+                    event_id=event_id,
+                    allow_final_correction=True,
+                )
+                progress = interview_progress(session.turns)
+                result = {
+                    "ok": True,
+                    "status": session.status,
+                    "interview_progress": progress,
+                    "next_action": "finish_interview",
+                    "instruction": (
+                        "The final transcript update was stored. Do not ask another question. "
+                        "Call finish_interview and only announce completion after it succeeds."
+                    ),
+                }
+                result.update(_public_delta(session, include_transcript=include_transcript))
+                if include_transcript:
+                    result.update(_public_session(session))
+                return result
             anticipated_progress = interview_progress(before.turns, pending_answer=True)
             if anticipated_progress["ready_to_finish"]:
                 session = await service.submit_answer(
@@ -143,34 +184,44 @@ async def record_candidate_answer(
                     event_id=event_id,
                     finish_after_answer=True,
                 )
-                return {
+                result = {
                     "ok": True,
-                    **_public_session(session),
+                    "status": session.status,
+                    "interview_progress": interview_progress(session.turns),
                     "next_action": "finish_interview",
                     "instruction": (
                         "The required coverage or answer limit has been reached. Do not ask "
-                        "another question. Tell the candidate clearly that the interview is "
-                        "complete, then call finish_interview and present its report."
+                        "another question. Call finish_interview first; only after it succeeds, "
+                        "tell the candidate clearly that the interview is complete and present "
+                        "its report."
                     ),
                 }
+                result.update(_public_delta(session, include_transcript=include_transcript))
+                if include_transcript:
+                    result.update(_public_session(session))
+                return result
             if not next_turn_json:
                 raise ValueError("next_turn_json is required until the interview is ready to finish")
             proposal = _decode(next_turn_json, "next_turn_json")
             model.provide(proposal)
             session = await service.submit_answer(session_id, transcript, event_id=event_id)
             progress = interview_progress(session.turns)
-        return {
+        result = {
             "ok": True,
-            **_public_session(session),
+            "status": session.status,
+            "interview_progress": progress,
             "next_action": _next_action(session, progress),
             "instruction": (
-                "The transcript was stored once. Ask the returned interviewer turn only when "
-                "next_action is ask_next_question. After every finalized answer, call "
-                "record_candidate_answer before continuing. If next_action is finish_interview, "
-                "announce completion and call finish_interview instead of asking the returned "
-                "turn. Do not read internal state aloud."
+                "The transcript was stored once. Use the returned candidate_turn and next_turn "
+                "only; do not request or restate the full transcript. Ask next_turn only when "
+                "next_action is ask_next_question. If next_action is finish_interview, call "
+                "finish_interview first, then announce completion only after that call succeeds."
             ),
         }
+        result.update(_public_delta(session, include_transcript=include_transcript))
+        if include_transcript:
+            result.update(_public_session(session))
+        return result
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -189,7 +240,7 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             session = await service.finish(session_id)
         return {
             "ok": True,
-            **_public_session(session),
+            **_public_session(session, include_transcript=False),
             "interview_complete": session.status == "completed",
             "instruction": (
                 "Tell the candidate clearly in their language that the interview is complete "

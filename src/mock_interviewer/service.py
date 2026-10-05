@@ -111,6 +111,7 @@ class InterviewService:
         *,
         event_id: str | None = None,
         finish_after_answer: bool = False,
+        allow_final_correction: bool = False,
     ) -> InterviewSession:
         session = self._require(session_id)
         lock = self._locks[session_id]
@@ -124,7 +125,12 @@ class InterviewService:
                 prior = session.event_results.get(event_id)
                 if prior is not None:
                     return self._copy(prior)
-            if not rules.can_transition(session.status, "submit_answer"):
+            is_final_correction = (
+                allow_final_correction
+                and session.status == "awaiting_report"
+                and session.report is None
+            )
+            if not rules.can_transition(session.status, "submit_answer") and not is_final_correction:
                 raise InvalidSessionTransition("This interview no longer accepts answers.")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Candidate answer must not be blank")
@@ -132,6 +138,12 @@ class InterviewService:
             if len(clean) > self.MAX_ANSWER_CHARS:
                 raise ValueError("Candidate answer exceeds the length limit")
             candidate = Turn(id=self._turn_id(session), role="candidate", text=clean)
+            if is_final_correction:
+                session.turns.append(candidate)
+                session.version += 1
+                if event_id:
+                    session.event_results[event_id] = self._copy(session)
+                return self._copy(session)
             if finish_after_answer:
                 session.turns.append(candidate)
                 session.status = "awaiting_report"
@@ -314,8 +326,13 @@ class InterviewService:
             raise InvalidReport("Model returned an incomplete practice report") from exc
         if not isinstance(recommendation, str) or recommendation not in self.ALLOWED_RECOMMENDATIONS:
             raise InvalidReport("Model returned an unsupported recommendation")
-        if not isinstance(scores, dict) or any(key not in self.ALLOWED_CRITERIA for key in scores):
-            raise InvalidReport("Report contains an unknown scoring criterion")
+        if not isinstance(scores, dict):
+            raise InvalidReport("Report scores must be an object")
+        invalid_scores = set(scores) - self.ALLOWED_CRITERIA
+        if invalid_scores:
+            allowed = ", ".join(sorted(self.ALLOWED_CRITERIA))
+            invalid = ", ".join(sorted(invalid_scores))
+            raise InvalidReport(f"Unknown scoring criteria: {invalid}. Allowed criteria: {allowed}")
         try:
             for score in scores.values():
                 rules.validate_score(score)
@@ -332,10 +349,13 @@ class InterviewService:
         for item in evidence:
             item = self._mapping(item)
             criterion, source_id, quote = item.get("criterion"), item.get("source_turn_id"), item.get("quote")
-            if not isinstance(criterion, str) or criterion not in self.ALLOWED_CRITERIA or not isinstance(source_id, str) or source_id not in turn_sources:
-                raise InvalidReport("Report evidence references an unknown criterion or source")
+            if not isinstance(criterion, str) or criterion not in self.ALLOWED_CRITERIA:
+                allowed = ", ".join(sorted(self.ALLOWED_CRITERIA))
+                raise InvalidReport(f"Unknown evidence criterion: {criterion}. Allowed criteria: {allowed}")
+            if not isinstance(source_id, str) or source_id not in turn_sources:
+                raise InvalidReport(f"Unknown evidence source: {source_id}. Use a candidate turn ID from interview_status or 'resume'.")
             if not isinstance(quote, str) or not rules.quote_is_supported(quote, turn_sources[source_id]):
-                raise InvalidReport("Report evidence quote is not present in its cited source")
+                raise InvalidReport(f"Evidence quote is not present in source {source_id}. Use an exact excerpt from that candidate turn or resume.")
             if not isinstance(item.get("observation"), str) or not item["observation"].strip():
                 raise InvalidReport("Report evidence observation is required")
         if recommendation == "insufficient_data":
