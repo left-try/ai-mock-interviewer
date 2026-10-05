@@ -9,6 +9,12 @@ from typing import Any
 
 from mock_interviewer.errors import InterviewError
 from mock_interviewer.interview_plan import interview_progress
+from mock_interviewer.report_export import (
+    ReportExportError,
+    default_reports_dir,
+    export_report_files,
+    render_report_markdown,
+)
 from mock_interviewer.service import InterviewService
 
 from voice_probe import mcp
@@ -41,6 +47,7 @@ class HostProposalModel:
 
 _sessions: dict[str, tuple[InterviewService, HostProposalModel]] = {}
 _sessions_lock = threading.RLock()
+REPORTS_DIR = default_reports_dir()
 
 
 def _decode(value: str, field: str) -> dict:
@@ -238,14 +245,28 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
         async with model.response_lock:
             model.provide(_decode(report_json, "report_json"))
             session = await service.finish(session_id)
+        try:
+            files = export_report_files(session.report, session.turns, session.id, output_dir=REPORTS_DIR)
+            report_markdown = files["markdown"]
+            report_files = {"markdown_path": files["markdown_path"], "pdf_path": files["pdf_path"]}
+            export_error = None
+        except ReportExportError as exc:
+            report_markdown = render_report_markdown(session.report, session.turns)
+            report_files = None
+            export_error = str(exc)
         return {
             "ok": True,
             **_public_session(session, include_transcript=False),
             "interview_complete": session.status == "completed",
+            "report_markdown": report_markdown,
+            "report_files": report_files,
+            "report_export_error": export_error,
             "instruction": (
                 "Tell the candidate clearly in their language that the interview is complete "
-                "(for example, say ‘Интервью завершено’), then present the "
-                "validated report as practice feedback. If recommendation is insufficient_data, "
+                "(for example, say ‘Интервью завершено’), display report_markdown visibly in "
+                "the chat, and provide the Markdown and PDF report_files. If report_export_error "
+                "is present, still display the validated Markdown report and clearly explain "
+                "that the file exports could not be saved. If recommendation is insufficient_data, "
                 "explain that evidence was limited. Do not claim a hiring decision."
             ),
         }

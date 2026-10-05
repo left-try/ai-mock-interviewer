@@ -29,6 +29,8 @@ def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
     assert "next_action" in instructions
     assert "finish_interview" in instructions
     assert "include_transcript=false" in instructions
+    assert "report_markdown" in instructions
+    assert ".pdf" in instructions
 
 
 async def test_interview_progress_requires_topic_coverage_and_at_least_eight_answers():
@@ -301,5 +303,82 @@ async def test_report_error_names_unknown_evidence_criterion_for_repair():
         assert result["ok"] is False
         assert "expectations" in result["error"]
         assert "Allowed criteria" in result["error"]
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_finish_returns_visible_markdown_and_exported_report_files(tmp_path, monkeypatch):
+    bridge, _ = _voice_modules()
+    monkeypatch.setattr(bridge, "REPORTS_DIR", tmp_path, raising=False)
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": ["Добавить конкретные примеры."],
+                    "evidence": [],
+                    "uncertainties": ["В тесте нет ответов кандидата."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+
+        assert result["ok"] is True
+        assert result["interview_complete"] is True
+        assert "# Отчёт HR-интервью" in result["report_markdown"]
+        assert Path(result["report_files"]["markdown_path"]).exists()
+        assert Path(result["report_files"]["pdf_path"]).exists()
+        assert result["report_files"]["markdown_path"].endswith(".md")
+        assert result["report_files"]["pdf_path"].endswith(".pdf")
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_report_export_failure_preserves_visible_validated_markdown(monkeypatch):
+    bridge, _ = _voice_modules()
+    export_module = importlib.import_module("mock_interviewer.report_export")
+
+    def fail_export(*_args, **_kwargs):
+        raise export_module.ReportExportError("write permission denied")
+
+    monkeypatch.setattr(bridge, "export_report_files", fail_export)
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [],
+                    "uncertainties": ["В тесте нет ответов кандидата."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+
+        assert result["ok"] is True
+        assert result["interview_complete"] is True
+        assert "# Отчёт HR-интервью" in result["report_markdown"]
+        assert result["report_files"] is None
+        assert "write permission denied" in result["report_export_error"]
     finally:
         await bridge.delete_interview(session_id)

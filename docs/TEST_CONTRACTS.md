@@ -46,6 +46,8 @@ Calls are asynchronous. Invalid user input raises `ValueError` or a documented a
 - `record_candidate_answer` supports a compact voice mode that returns only the latest saved answer, the next interviewer turn, and progress. It does not resend the full transcript on each turn.
 - If a finalized transcript tail arrives after the session enters `awaiting_report` but before report creation, it is appended exactly once and included in the report. A completed report remains immutable.
 - The host announces a completed interview only after `finish_interview` succeeds; a failed report call cannot be described as a finished report.
+- A successful `finish_interview` returns the full validated report as Markdown for visible chat presentation and saves matching `.md` and `.pdf` files locally. The PDF must retain Cyrillic text and be searchable.
+- If local file export fails after report validation, the completed report and Markdown text are still returned, alongside an explicit export error; the host must show the text and disclose the file failure.
 - If the candidate stops early or the maximum answer count is reached with uncovered topics, the report must preserve those gaps as uncertainty.
 - These host/MCP behaviors are covered by `tests/test_voice_interview_workflow.py`; this supplements the service contracts above without changing existing assertions.
 
