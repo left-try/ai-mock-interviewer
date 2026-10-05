@@ -21,7 +21,22 @@ SERVER_NAME = "interviewer-voice-probe"
 DATA_DIR = Path(__file__).resolve().parents[1] / ".voice-probe"
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 
-mcp = MCPServer(SERVER_NAME, version="0.1.0")
+mcp = MCPServer(
+    SERVER_NAME,
+    version="0.1.0",
+    instructions=(
+        "For a real interview, this MCP session is the authoritative interview record. "
+        "After every finalized candidate answer, call record_candidate_answer exactly once "
+        "before speaking another interviewer question. Reuse an event_id only to retry the "
+        "same answer. Follow interview_progress and next_action from tool results. When "
+        "next_action is finish_interview, announce clearly that the interview is complete, "
+        "call finish_interview, and then give the validated practice report; if the user "
+        "ends early, finish the report as an early exit. The normal Backend Internship HR "
+        "interview covers motivation, education, project, personal contribution, teamwork, "
+        "challenge, reflection, and expectations over eight to ten candidate answers. "
+        "Do not use voice-probe tools for a real interview."
+    ),
+)
 _lock = threading.RLock()
 
 
