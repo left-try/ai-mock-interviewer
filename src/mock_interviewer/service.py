@@ -50,7 +50,7 @@ class InterviewService:
     MAX_FOLLOW_UPS_PER_TOPIC = 2
     MAX_TURNS = 24
     ALLOWED_TOPICS = {
-        "motivation", "project", "personal_contribution", "teamwork",
+        "motivation", "education", "project", "personal_contribution", "teamwork",
         "challenge", "reflection", "expectations",
     }
     ALLOWED_KINDS = {"question", "follow_up", "repeat"}
@@ -104,7 +104,14 @@ class InterviewService:
             raise ResumeParseError("Resume could not be parsed. Check the file and try again.") from exc
         return await self.start(resume_text=text)
 
-    async def submit_answer(self, session_id: str, text: str, *, event_id: str | None = None) -> InterviewSession:
+    async def submit_answer(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        event_id: str | None = None,
+        finish_after_answer: bool = False,
+    ) -> InterviewSession:
         session = self._require(session_id)
         lock = self._locks[session_id]
         if lock.locked():
@@ -125,6 +132,13 @@ class InterviewService:
             if len(clean) > self.MAX_ANSWER_CHARS:
                 raise ValueError("Candidate answer exceeds the length limit")
             candidate = Turn(id=self._turn_id(session), role="candidate", text=clean)
+            if finish_after_answer:
+                session.turns.append(candidate)
+                session.status = "awaiting_report"
+                session.version += 1
+                if event_id:
+                    session.event_results[event_id] = self._copy(session)
+                return self._copy(session)
             proposed_turns = [*session.turns, candidate]
             if len(proposed_turns) >= int(self.limits["max_turns"]):
                 session.turns.append(candidate)

@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 from mock_interviewer.errors import InterviewError
+from mock_interviewer.interview_plan import interview_progress
 from mock_interviewer.service import InterviewService
 
 from voice_probe import mcp
@@ -61,6 +62,7 @@ def _public_session(session):
         "session_id": session.id,
         "status": session.status,
         "turns": [_public_turn(turn) for turn in session.turns],
+        "interview_progress": interview_progress(session.turns),
         "report": None if session.report is None else {
             "recommendation": session.report.recommendation,
             "scores": session.report.scores,
@@ -73,9 +75,15 @@ def _public_session(session):
     }
 
 
+def _next_action(session, progress):
+    if session.status == "awaiting_report" or progress["ready_to_finish"]:
+        return "finish_interview"
+    return "ask_next_question"
+
+
 @mcp.tool()
 async def start_interview(resume_text: str, first_turn_json: str) -> dict:
-    """Start Backend Internship HR practice using a synthetic resume. Supply a structured first question proposal as JSON."""
+    """Start Backend Internship HR practice. Log every finalized answer using record_candidate_answer; follow the returned interview progress through automatic completion."""
     try:
         proposal = _decode(first_turn_json, "first_turn_json")
         model = HostProposalModel()
@@ -84,14 +92,31 @@ async def start_interview(resume_text: str, first_turn_json: str) -> dict:
         session = await service.start(resume_text=resume_text)
         with _sessions_lock:
             _sessions[session.id] = (service, model)
-        return {"ok": True, **_public_session(session), "instruction": "Speak the interviewer question exactly once. For each finalized candidate answer, call record_candidate_answer once with a new event_id and a structured next_turn_json proposal. Do not expose scoring criteria or internal notes."}
+        return {
+            "ok": True,
+            **_public_session(session),
+            "next_action": "ask_next_question",
+            "instruction": (
+                "Ask the opening question. After every finalized candidate answer, call "
+                "record_candidate_answer exactly once before asking anything else; use a "
+                "new event_id for each answer. Follow interview_progress and next_action. "
+                "At finish_interview, clearly tell the candidate the interview is complete, "
+                "then call finish_interview and give its validated practice report. Do not "
+                "expose scoring criteria or internal notes."
+            ),
+        }
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
 
 
 @mcp.tool()
-async def record_candidate_answer(session_id: str, transcript: str, event_id: str, next_turn_json: str) -> dict:
-    """Record one finalized candidate transcript and validate the next interviewer-turn proposal."""
+async def record_candidate_answer(
+    session_id: str,
+    transcript: str,
+    event_id: str,
+    next_turn_json: str = "",
+) -> dict:
+    """Record one finalized answer; the result says whether to ask another question or finish."""
     try:
         with _sessions_lock:
             pair = _sessions.get(session_id)
@@ -102,18 +127,57 @@ async def record_candidate_answer(session_id: str, transcript: str, event_id: st
         async with model.response_lock:
             previous = await service.get_event_result(session_id, event_id)
             if previous is not None:
-                return {"ok": True, "duplicate": True, **_public_session(previous)}
+                prior_progress = interview_progress(previous.turns)
+                return {
+                    "ok": True,
+                    "duplicate": True,
+                    **_public_session(previous),
+                    "next_action": _next_action(previous, prior_progress),
+                }
+            before = await service.get_session(session_id)
+            anticipated_progress = interview_progress(before.turns, pending_answer=True)
+            if anticipated_progress["ready_to_finish"]:
+                session = await service.submit_answer(
+                    session_id,
+                    transcript,
+                    event_id=event_id,
+                    finish_after_answer=True,
+                )
+                return {
+                    "ok": True,
+                    **_public_session(session),
+                    "next_action": "finish_interview",
+                    "instruction": (
+                        "The required coverage or answer limit has been reached. Do not ask "
+                        "another question. Tell the candidate clearly that the interview is "
+                        "complete, then call finish_interview and present its report."
+                    ),
+                }
+            if not next_turn_json:
+                raise ValueError("next_turn_json is required until the interview is ready to finish")
             proposal = _decode(next_turn_json, "next_turn_json")
             model.provide(proposal)
             session = await service.submit_answer(session_id, transcript, event_id=event_id)
-        return {"ok": True, **_public_session(session), "instruction": "The transcript was stored once. Speak a returned interviewer turn once, if present. Do not read internal state aloud."}
+            progress = interview_progress(session.turns)
+        return {
+            "ok": True,
+            **_public_session(session),
+            "next_action": _next_action(session, progress),
+            "instruction": (
+                "The transcript was stored once. Ask the returned interviewer turn only when "
+                "next_action is ask_next_question. After every finalized answer, call "
+                "record_candidate_answer before continuing. If next_action is finish_interview, "
+                "announce completion and call finish_interview instead of asking the returned "
+                "turn. Do not read internal state aloud."
+            ),
+        }
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
 
 
 @mcp.tool()
 async def finish_interview(session_id: str, report_json: str) -> dict:
-    """Finish the practice and validate an evidence-based training report proposal."""
+    """Finish the interview and validate its evidence-based training report."""
     try:
         with _sessions_lock:
             pair = _sessions.get(session_id)
@@ -123,7 +187,17 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
         async with model.response_lock:
             model.provide(_decode(report_json, "report_json"))
             session = await service.finish(session_id)
-        return {"ok": True, **_public_session(session)}
+        return {
+            "ok": True,
+            **_public_session(session),
+            "interview_complete": session.status == "completed",
+            "instruction": (
+                "Tell the candidate clearly in their language that the interview is complete "
+                "(for example, say ‘Интервью завершено’), then present the "
+                "validated report as practice feedback. If recommendation is insufficient_data, "
+                "explain that evidence was limited. Do not claim a hiring decision."
+            ),
+        }
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
 

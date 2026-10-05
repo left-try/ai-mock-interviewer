@@ -38,6 +38,14 @@ Calls are asynchronous. Invalid user input raises `ValueError` or a documented a
 - Distinct writes to one session are serialized or one fails with `ConcurrentSessionUpdate`; they must not silently overwrite one another.
 - A completed report is immutable and repeated `finish` calls are idempotent.
 
+## Voice interview workflow contract
+
+- The voice host records every finalized candidate answer through `record_candidate_answer` before asking another question. Each answer has a distinct idempotency key; a retry reuses the same key and cannot duplicate the answer.
+- The active Backend Internship HR interview covers motivation, education, project experience, personal contribution, teamwork, a challenge, reflection, and expectations. The normal target is 8–10 candidate answers.
+- The host follows deterministic `interview_progress` and `next_action` fields returned by MCP. It must announce completion itself when directed, then request the report without inventing an extra unanswered question.
+- If the candidate stops early or the maximum answer count is reached with uncovered topics, the report must preserve those gaps as uncertainty.
+- These host/MCP behaviors are covered by `tests/test_voice_interview_workflow.py`; this supplements the service contracts above without changing existing assertions.
+
 ## Model output contract
 
 Next-turn structured output contains `kind`, `topic_id`, `text`, `evidence`, and `confidence`. `kind` is an allowlisted action; model output cannot choose arbitrary tools, code, shell, browser or filesystem actions. The service validates every output before adding it to state or displaying it.
