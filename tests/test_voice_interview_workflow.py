@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -31,6 +34,58 @@ def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
     assert "include_transcript=false" in instructions
     assert "report_markdown" in instructions
     assert ".pdf" in instructions
+    assert "preparing the final report" in instructions.lower()
+
+
+@pytest.mark.asyncio
+async def test_report_export_does_not_block_mcp_event_loop(tmp_path, monkeypatch):
+    bridge, _ = _voice_modules()
+    monkeypatch.setattr(bridge, "REPORTS_DIR", tmp_path, raising=False)
+    export_thread_ids = []
+    event_loop_ticks = []
+    original_export = bridge.export_report_files
+
+    def slow_export(*args, **kwargs):
+        export_thread_ids.append(threading.get_ident())
+        time.sleep(0.08)
+        return original_export(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "export_report_files", slow_export)
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+    loop_thread_id = threading.get_ident()
+
+    async def observe_loop():
+        await asyncio.sleep(0.01)
+        event_loop_ticks.append(True)
+
+    try:
+        result, _ = await asyncio.gather(
+            bridge.finish_interview(
+                session_id=session_id,
+                report_json=json.dumps(
+                    {
+                        "recommendation": "insufficient_data",
+                        "scores": {},
+                        "strengths": [],
+                        "growth_areas": [],
+                        "evidence": [],
+                        "uncertainties": ["В тесте нет ответов кандидата."],
+                        "disclaimer": "Учебная обратная связь для практики.",
+                    }
+                ),
+            ),
+            observe_loop(),
+        )
+
+        assert result["ok"] is True
+        assert event_loop_ticks == [True]
+        assert export_thread_ids and export_thread_ids[0] != loop_thread_id
+    finally:
+        await bridge.delete_interview(session_id)
 
 
 async def test_interview_progress_requires_topic_coverage_and_at_least_eight_answers():

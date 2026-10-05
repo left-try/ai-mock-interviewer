@@ -176,7 +176,9 @@ async def record_candidate_answer(
                     "next_action": "finish_interview",
                     "instruction": (
                         "The final transcript update was stored. Do not ask another question. "
-                        "Call finish_interview and only announce completion after it succeeds."
+                        "Tell the candidate the questions are complete and you are preparing "
+                        "the final report, then call finish_interview. Announce the interview "
+                        "as fully complete only after that tool succeeds."
                     ),
                 }
                 result.update(_public_delta(session, include_transcript=include_transcript))
@@ -198,9 +200,9 @@ async def record_candidate_answer(
                     "next_action": "finish_interview",
                     "instruction": (
                         "The required coverage or answer limit has been reached. Do not ask "
-                        "another question. Call finish_interview first; only after it succeeds, "
-                        "tell the candidate clearly that the interview is complete and present "
-                        "its report."
+                        "another question. Tell the candidate the questions are complete and "
+                        "you are preparing the final report, then call finish_interview. Only "
+                        "after it succeeds, say the interview is complete and present the report."
                     ),
                 }
                 result.update(_public_delta(session, include_transcript=include_transcript))
@@ -221,8 +223,9 @@ async def record_candidate_answer(
             "instruction": (
                 "The transcript was stored once. Use the returned candidate_turn and next_turn "
                 "only; do not request or restate the full transcript. Ask next_turn only when "
-                "next_action is ask_next_question. If next_action is finish_interview, call "
-                "finish_interview first, then announce completion only after that call succeeds."
+                "next_action is ask_next_question. If next_action is finish_interview, tell "
+                "the candidate the questions are complete and you are preparing the final "
+                "report, then call finish_interview; announce full completion only after it succeeds."
             ),
         }
         result.update(_public_delta(session, include_transcript=include_transcript))
@@ -246,7 +249,9 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             model.provide(_decode(report_json, "report_json"))
             session = await service.finish(session_id)
         try:
-            files = export_report_files(session.report, session.turns, session.id, output_dir=REPORTS_DIR)
+            files = await asyncio.to_thread(
+                export_report_files, session.report, session.turns, session.id, output_dir=REPORTS_DIR
+            )
             report_markdown = files["markdown"]
             report_files = {"markdown_path": files["markdown_path"], "pdf_path": files["pdf_path"]}
             export_error = None
