@@ -69,6 +69,55 @@ The current interview flow requires a resume, gives little visible feedback whil
 4. The analyzer reads the completed JSONL and produces a local timing summary without calling a model or external service.
 5. Report validation produces the authoritative report model. Markdown and PDF render from that same validated model.
 
+## Test plan
+
+### Unit tests
+
+- **Synthetic test start:** starting test mode builds the configured synthetic profile, does not invoke resume parsing, and does not read or require an attachment.
+- **Run log schema:** each supported event has a run ID, event name, UTC timestamp, monotonic offset/duration, and valid JSONL encoding; answer text is present only for the explicit local test workflow.
+- **Timing calculations:** operation durations use a monotonic clock, are non-negative, and distinguish MCP processing durations from inter-call client gaps. Empty samples and a single sample do not cause invalid percentile calculations.
+- **Summary analyzer:** reports event counts, missing lifecycle events, operation samples, and p50/p95 only when the sample count supports them; malformed JSONL lines and unknown future event types produce an actionable diagnostic without discarding valid neighboring events.
+- **Retention and deletion:** expired test logs are pruned at startup according to the 30-day policy, recent logs remain, and explicit deletion removes test logs without touching interview reports or probe logs.
+- **PDF flowables:** long quotes and observations wrap without overlap; section headings remain associated with their content; multi-page documents retain headers/footers and a non-orphaned disclaimer.
+- **Infographic semantics:** topic coverage reflects actual topic IDs; score bars render only scored criteria; `insufficient_data` displays no fabricated aggregate percentage or score.
+
+### Service and MCP contract tests
+
+- Start a test session without resume text or attachment and verify it receives a synthetic profile, a test-mode marker, and a fresh run log.
+- Record a candidate answer once and verify it is persisted before any next-question proposal is accepted.
+- Replay the same answer event ID and verify one candidate turn and one answer log event exist; reject a conflicting payload under an already-used event ID.
+- Accept a valid next-turn proposal after answer persistence; reject invalid kinds/topics and ensure failures do not corrupt prior state or append success events.
+- Stop after any answer count and verify an early-exit report preserves unanswered topics as uncertainty and exports both formats.
+- Exercise duplicate report finish, export failure, log-write failure, analyzer failure, clear-log, and retention cleanup without turning a valid transcript into a false completion.
+- Verify the resume-based path uses the same answer-first contract and that the latest transcript tail is recorded before report validation.
+
+### Integration tests with a fake host model
+
+- Run a complete synthetic interview through start, answer save, delayed next-turn proposal, report validation, log summary, and Markdown/PDF export; assert event order and trace correlation.
+- Simulate interruption after answer persistence but before the next question and verify the session can resume without duplicating the answer or losing progress.
+- Run two sessions concurrently and verify logs, event IDs, metrics, and exports remain isolated.
+- Verify a failed PDF export still returns the validated Markdown report and records the export error and duration.
+
+### Performance and diagnostic checks
+
+- Use a deterministic fake clock to verify measured MCP stage durations and client gaps independently.
+- Run a local test interview and report raw sample counts plus p50/p95 for answer-save processing, proposal-validation processing, report validation, Markdown/PDF export, full MCP calls, and client gaps.
+- Do not assert model TTFT or private model reasoning duration. Collect baseline samples first; do not invent latency budgets before a baseline exists.
+
+### Manual Codex Voice checks
+
+- Start `/test-backend-interview` in Voice with no attachment and confirm the opening does not ask for a resume.
+- After each spoken answer, pause for 1, 3, and 5 seconds in separate runs; note whether Codex Voice finalizes the transcript and whether a tool call follows. Treat these as observations, not proof that the server enforces a silence threshold.
+- Confirm the candidate hears a brief acknowledgment before the next question is generated/spoken, and hears a report-preparation sentence before report work. Record any visible or audible wait separately from measured MCP durations.
+- Listen for robotic cadence, stutters, clipping, and abrupt timing using the same selected voice and comparable prompts. The MCP logs cannot capture or score audio quality.
+- Confirm full report text, file links, test-run log location, and clear-log behavior after normal and early-stop runs.
+
+### PDF visual review
+
+- Generate fixtures for insufficient evidence, complete scored evidence, long quotes, empty lists, and enough content to span multiple pages.
+- Render every page to PNG with Poppler at reading resolution and inspect for overlapping panels, clipped text, broken Cyrillic glyphs, awkward page breaks, orphaned headings, and disclaimer placement.
+- Reopen generated PDFs with `pypdf`, verify expected report text remains searchable, and confirm the verdict, coverage visualization, scored criteria, evidence, uncertainty, and disclaimer are present.
+
 ## Acceptance criteria
 
 - A user can start a test interview without an attachment; the workflow clearly identifies itself as a test and generates a report at completion or early stop.
