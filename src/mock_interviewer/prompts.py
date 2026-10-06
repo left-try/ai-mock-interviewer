@@ -17,12 +17,17 @@ def interview_messages(resume_text, turns, *, rubric=None):
     return messages
 
 
-def report_messages(resume_text, turns, rubric=None):
+def report_messages(resume_text, turns, rubric=None, *, test_mode: bool = False):
     transcript = [{"id": t.id, "role": t.role, "text": t.text} for t in turns]
     return [
-        {"role": "system", "content": SYSTEM_REPORT},
+        {"role": "system", "content": SYSTEM_REPORT + (
+            " The synthetic profile is context for asking questions only; do not treat it as candidate evidence. "
+            "Assess only recorded candidate turns and do not cite the synthetic profile."
+            if test_mode else ""
+        )},
         {"role": "user", "content": (
-            f"Untrusted resume data:\n<resume>\n{resume_text}\n</resume>\n"
+            ("Synthetic interviewer context (not candidate evidence):\n" if test_mode else "Untrusted resume data:\n")
+            + f"<resume>\n{resume_text}\n</resume>\n"
             f"Transcript data:\n{transcript!r}\n"
             f"Evaluation criteria (internal, do not echo): {list((rubric or {}).keys()) or ['self_presentation','motivation','personal_contribution','communication','reflection','consistency']}\n"
             "Return recommendation, scores, strengths, growth_areas, evidence, uncertainties, disclaimer."

@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 import copy
 import io
-import re
 import uuid
 import zipfile
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
 from .domain import rules
 from .domain.models import InterviewReport, InterviewSession, NextTurn, Turn
 from .errors import (
-    ConcurrentSessionUpdate, InvalidModelOutput, InvalidReport,
-    InvalidSessionTransition, ModelProviderError, ResumeParseError,
-    ResumeValidationError, SessionNotFound,
+    ConcurrentSessionUpdate,
+    InvalidModelOutput,
+    InvalidReport,
+    InvalidSessionTransition,
+    ModelProviderError,
+    ResumeParseError,
+    ResumeValidationError,
+    SessionNotFound,
 )
 from .graph import build_graph
 from .prompts import interview_messages, report_messages
@@ -49,13 +53,13 @@ class InterviewService:
     MAX_UPLOAD_CHARS = 2_000_000
     MAX_FOLLOW_UPS_PER_TOPIC = 2
     MAX_TURNS = 24
-    ALLOWED_TOPICS = {
+    ALLOWED_TOPICS: ClassVar[set[str]] = {
         "motivation", "education", "project", "personal_contribution", "teamwork",
         "challenge", "reflection", "expectations",
     }
-    ALLOWED_KINDS = {"question", "follow_up", "repeat"}
-    ALLOWED_RECOMMENDATIONS = {"strong_signal", "mixed_signal", "insufficient_data"}
-    ALLOWED_CRITERIA = {
+    ALLOWED_KINDS: ClassVar[set[str]] = {"question", "follow_up", "repeat"}
+    ALLOWED_RECOMMENDATIONS: ClassVar[set[str]] = {"strong_signal", "mixed_signal", "insufficient_data"}
+    ALLOWED_CRITERIA: ClassVar[set[str]] = {
         "self_presentation", "motivation", "personal_contribution",
         "communication", "reflection", "consistency", "teamwork", "challenge",
     }
@@ -81,9 +85,14 @@ class InterviewService:
         except Exception as exc:
             raise ModelProviderError() from exc
 
-    async def start(self, *, resume_text: str) -> InterviewSession:
+    async def start(self, *, resume_text: str, test_mode: bool = False) -> InterviewSession:
         text = self._validate_resume_text(resume_text)
-        session = InterviewSession(id=str(uuid.uuid4()), status="active", resume_text=text)
+        session = InterviewSession(
+            id=str(uuid.uuid4()),
+            status="active",
+            resume_text=text,
+            test_mode=test_mode,
+        )
         try:
             value = await self._invoke(interview_messages(text, [], rubric=self.rubric), NextTurnSchema)
             next_turn = self._validate_next_turn(value)
@@ -124,6 +133,8 @@ class InterviewService:
                     raise ValueError("Invalid event_id")
                 prior = session.event_results.get(event_id)
                 if prior is not None:
+                    if session.event_payloads.get(event_id) != text.strip():
+                        raise InvalidSessionTransition("An event_id cannot be reused for different answer text.")
                     return self._copy(prior)
             is_final_correction = (
                 allow_final_correction
@@ -132,12 +143,16 @@ class InterviewService:
             )
             if not rules.can_transition(session.status, "submit_answer") and not is_final_correction:
                 raise InvalidSessionTransition("This interview no longer accepts answers.")
+            if session.pending_answer_event_id is not None and not is_final_correction:
+                raise InvalidSessionTransition("The previous saved answer needs a question proposal or early finish.")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Candidate answer must not be blank")
             clean = text.strip()
             if len(clean) > self.MAX_ANSWER_CHARS:
                 raise ValueError("Candidate answer exceeds the length limit")
             candidate = Turn(id=self._turn_id(session), role="candidate", text=clean)
+            if event_id:
+                session.event_payloads[event_id] = clean
             if is_final_correction:
                 session.turns.append(candidate)
                 session.version += 1
@@ -191,6 +206,91 @@ class InterviewService:
                 session.event_results[event_id] = self._copy(session)
             return self._copy(session)
 
+    async def persist_answer(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        event_id: str,
+        allow_final_correction: bool = False,
+    ) -> InterviewSession:
+        """Persist a finalized answer without waiting for the next question proposal."""
+        session = self._require(session_id)
+        lock = self._locks[session_id]
+        if lock.locked():
+            raise ConcurrentSessionUpdate("Another update is already being processed for this interview.")
+        async with lock:
+            session = self._require(session_id)
+            if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 128:
+                raise ValueError("Invalid event_id")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Candidate answer must not be blank")
+            clean = text.strip()
+            if len(clean) > self.MAX_ANSWER_CHARS:
+                raise ValueError("Candidate answer exceeds the length limit")
+
+            if event_id in session.event_payloads:
+                if session.event_payloads[event_id] != clean:
+                    raise InvalidSessionTransition("An event_id cannot be reused for different answer text.")
+                return self._copy(session)
+
+            final_correction = (
+                allow_final_correction
+                and session.status == "awaiting_report"
+                and session.report is None
+            )
+            if not rules.can_transition(session.status, "submit_answer") and not final_correction:
+                raise InvalidSessionTransition("This interview no longer accepts answers.")
+            if session.pending_answer_event_id is not None:
+                raise InvalidSessionTransition("The previous saved answer needs a question proposal or early finish.")
+
+            session.event_payloads[event_id] = clean
+            session.turns.append(Turn(id=self._turn_id(session), role="candidate", text=clean))
+            if not final_correction:
+                session.pending_answer_event_id = event_id
+            session.version += 1
+            session.event_results[event_id] = self._copy(session)
+            return self._copy(session)
+
+    async def propose_next_turn(
+        self,
+        session_id: str,
+        answer_event_id: str,
+        proposal: dict[str, Any],
+    ) -> InterviewSession:
+        """Validate and append one interviewer turn for a previously saved answer."""
+        session = self._require(session_id)
+        lock = self._locks[session_id]
+        if lock.locked():
+            raise ConcurrentSessionUpdate("Another update is already being processed for this interview.")
+        async with lock:
+            session = self._require(session_id)
+            if answer_event_id in session.proposal_payloads:
+                if session.proposal_payloads[answer_event_id] != proposal:
+                    raise InvalidSessionTransition("An answer event cannot be paired with a different question proposal.")
+                return self._copy(session)
+            if session.pending_answer_event_id != answer_event_id:
+                raise InvalidSessionTransition("No saved answer is waiting for this question proposal.")
+            if session.status != "active":
+                raise InvalidSessionTransition("This interview cannot accept a question proposal now.")
+
+            next_turn = self._validate_next_turn(proposal)
+            history = [turn.text for turn in session.turns if turn.role == "interviewer"]
+            if rules.is_duplicate_question(next_turn.text, history):
+                raise InvalidModelOutput("The proposed interviewer question repeats an earlier question.")
+            if next_turn.kind == "follow_up":
+                count = session.follow_ups.get(next_turn.topic_id, 0)
+                if count >= self.MAX_FOLLOW_UPS_PER_TOPIC:
+                    raise InvalidModelOutput("The follow-up limit for this topic has been reached.")
+                session.follow_ups[next_turn.topic_id] = count + 1
+
+            session.turns.append(self._interviewer_turn(next_turn, len(session.turns) + 1))
+            session.pending_answer_event_id = None
+            session.proposal_payloads[answer_event_id] = copy.deepcopy(proposal)
+            session.version += 1
+            session.event_results[answer_event_id] = self._copy(session)
+            return self._copy(session)
+
     async def finish(self, session_id: str) -> InterviewSession:
         session = self._require(session_id)
         lock = self._locks[session_id]
@@ -205,13 +305,20 @@ class InterviewService:
             session.status = "awaiting_report"
             try:
                 value = await self._invoke(
-                    report_messages(session.resume_text, session.turns, rubric=self.rubric), ReportSchema
+                    report_messages(
+                        session.resume_text,
+                        session.turns,
+                        rubric=self.rubric,
+                        test_mode=session.test_mode,
+                    ),
+                    ReportSchema,
                 )
                 report = self._validate_report(value, session)
             except (InvalidReport, ModelProviderError):
                 raise
             session.report = report
             session.status = "completed"
+            session.pending_answer_event_id = None
             session.version += 1
             return self._copy(session)
 
@@ -345,7 +452,8 @@ class InterviewService:
         if not isinstance(evidence, list):
             raise InvalidReport("Report evidence must be a list")
         turn_sources = {turn.id: turn.text for turn in session.turns if turn.role == "candidate"}
-        turn_sources["resume"] = session.resume_text
+        if not session.test_mode:
+            turn_sources["resume"] = session.resume_text
         for item in evidence:
             item = self._mapping(item)
             criterion, source_id, quote = item.get("criterion"), item.get("source_turn_id"), item.get("quote")

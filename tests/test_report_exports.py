@@ -70,7 +70,7 @@ def test_export_writes_cyrillic_markdown_and_searchable_pdf(tmp_path: Path):
 
 
 def test_reexporting_same_session_replaces_the_same_files(tmp_path: Path, monkeypatch):
-    import mock_interviewer.report_export as report_export
+    from mock_interviewer import report_export
 
     class AdvancingClock:
         from datetime import datetime as _datetime
@@ -91,3 +91,79 @@ def test_reexporting_same_session_replaces_the_same_files(tmp_path: Path, monkey
     assert second["markdown_path"] == first["markdown_path"]
     assert second["pdf_path"] == first["pdf_path"]
     assert len(list(tmp_path.iterdir())) == 2
+
+
+def test_markdown_shows_data_derived_verdict_coverage_and_known_score_bar():
+    markdown = render_report_markdown(_report(), _turns())
+
+    assert "Смешанный сигнал" in markdown
+    assert "Покрытие тем" in markdown
+    assert "1/8" in markdown
+    assert "Мотивация" in markdown
+    assert "4/5" in markdown
+    assert "2/5" in markdown
+
+
+def test_insufficient_data_does_not_invent_aggregate_score_or_hiring_probability():
+    insufficient = InterviewReport(
+        recommendation="insufficient_data",
+        scores={"motivation": None, "teamwork": None},
+        strengths=[],
+        growth_areas=[],
+        evidence=[],
+        uncertainties=["Недостаточно ответов."],
+        disclaimer="Учебная обратная связь для практики.",
+    )
+
+    markdown = render_report_markdown(insufficient, _turns())
+
+    assert "Недостаточно данных для оценки" in markdown
+    assert "Недостаточно данных" in markdown
+    assert "вероятность найма" not in markdown.lower()
+    assert "шанс найма" not in markdown.lower()
+    assert "Средний балл" not in markdown
+
+
+def test_pdf_contains_same_verdict_coverage_and_score_semantics(tmp_path: Path):
+    files = export_report_files(_report(), _turns(), "visual-contract", output_dir=tmp_path)
+    pdf_text = "\n".join(
+        page.extract_text() or "" for page in PdfReader(files["pdf_path"]).pages
+    )
+
+    assert "Смешанный сигнал" in pdf_text
+    assert "Покрытие тем" in pdf_text
+    assert "1/8" in pdf_text
+    assert "Мотивация" in pdf_text
+    assert "4/5" in pdf_text
+    assert "2/5" in pdf_text
+
+
+def test_pdf_long_evidence_and_disclaimer_remain_searchable_across_pages(tmp_path: Path):
+    long_quote = "Это подробный кандидатский ответ. " * 90
+    long_observation = "Наблюдение интервьюера с контекстом. " * 50
+    report = InterviewReport(
+        recommendation="mixed_signal",
+        scores={"motivation": 4},
+        strengths=["Инициативность."],
+        growth_areas=["Практика командной разработки."],
+        evidence=[{
+            "criterion": "motivation", "source_turn_id": "turn-2",
+            "quote": long_quote, "observation": long_observation,
+        }],
+        uncertainties=["Не проверен опыт проектирования API."],
+        disclaimer="Учебная обратная связь для практики; это не решение о найме.",
+    )
+    turns = [
+        Turn("turn-1", "interviewer", "Почему backend?", topic_id="motivation"),
+        Turn("turn-2", "candidate", long_quote),
+    ]
+
+    files = export_report_files(report, turns, "long-report", output_dir=tmp_path)
+    pages = PdfReader(files["pdf_path"]).pages
+    pdf_text = "\n".join(page.extract_text() or "" for page in pages)
+    normalized_pdf_text = " ".join(pdf_text.split())
+
+    assert len(pages) > 1
+    assert " ".join(long_quote[:100].split()) in normalized_pdf_text
+    assert " ".join(long_observation[:100].split()) in normalized_pdf_text
+    assert "это не решение о найме" in normalized_pdf_text

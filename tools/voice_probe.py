@@ -10,12 +10,11 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-
 
 SERVER_NAME = "interviewer-voice-probe"
 DATA_DIR = Path(__file__).resolve().parents[1] / ".voice-probe"
@@ -26,13 +25,15 @@ mcp = MCPServer(
     version="0.1.0",
     instructions=(
         "For a real interview, this MCP session is the authoritative interview record. "
-        "After every finalized candidate answer, call record_candidate_answer exactly once "
-        "before speaking another interviewer question. Reuse an event_id only to retry the "
-        "same answer. Pass include_transcript=false to record_candidate_answer to keep each "
-        "response compact; use its candidate_turn, next_turn, interview_progress, and "
-        "next_action fields. When next_action is finish_interview, tell the candidate that "
-        "the questions are complete and you are preparing the final report, then call "
-        "finish_interview. Announce full completion only if the tool succeeds. Display the complete "
+        "For every finalized candidate answer, use save_candidate_answer to persist it exactly once "
+        "before the host formulates another question. Briefly acknowledge that it was saved, then "
+        "call propose_next_turn with the saved answer_event_id. Reuse an event_id only to retry the "
+        "same answer. Pass include_transcript=false to save_candidate_answer to keep responses compact; use candidate_turn, "
+        "next_turn, interview_progress, and next_action. The compatibility tool "
+        "record_candidate_answer also records every finalized candidate answer for older clients. "
+        "When next_action is finish_interview, tell the candidate that the questions are complete "
+        "and you are preparing the final report, then call finish_interview. Announce full completion "
+        "only if the tool succeeds. Display the complete "
         "returned report_markdown visibly in chat and provide links to both .md and .pdf "
         "report_files; a spoken summary alone is not sufficient. If report export fails, still "
         "display report_markdown and explain the export error. If report validation fails, say "
@@ -76,7 +77,7 @@ def _append_event(event: dict[str, Any]) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _active_session(events: list[dict[str, Any]]) -> dict[str, Any] | None:

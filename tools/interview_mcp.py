@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import threading
+import time
+import uuid
+from pathlib import Path
 from typing import Any
+
+from voice_probe import mcp
 
 from mock_interviewer.errors import InterviewError
 from mock_interviewer.interview_plan import interview_progress
@@ -16,8 +21,8 @@ from mock_interviewer.report_export import (
     render_report_markdown,
 )
 from mock_interviewer.service import InterviewService
-
-from voice_probe import mcp
+from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILE
+from mock_interviewer.test_run_log import TestRunLog, default_test_runs_dir
 
 
 class HostProposalModel:
@@ -48,6 +53,11 @@ class HostProposalModel:
 _sessions: dict[str, tuple[InterviewService, HostProposalModel]] = {}
 _sessions_lock = threading.RLock()
 REPORTS_DIR = default_reports_dir()
+TEST_RUNS_DIR = default_test_runs_dir()
+_test_runs: dict[str, tuple[str, TestRunLog]] = {}
+_test_last_call_end: dict[str, float] = {}
+_test_run_ended: set[str] = set()
+_test_logged_answers: dict[str, set[str]] = {}
 
 
 def _decode(value: str, field: str) -> dict:
@@ -80,6 +90,7 @@ def _public_session(session, *, include_transcript=True):
     result = {
         "session_id": session.id,
         "status": session.status,
+        "test_mode": session.test_mode,
         "interview_progress": interview_progress(session.turns),
         "report": None if session.report is None else {
             "recommendation": session.report.recommendation,
@@ -102,9 +113,60 @@ def _next_action(session, progress):
     return "ask_next_question"
 
 
+def _test_log_for(session_id: str) -> tuple[str, TestRunLog] | None:
+    with _sessions_lock:
+        return _test_runs.get(session_id)
+
+
+def _append_test_event(session_id: str, event_name: str, *, duration_ms=None, details=None) -> str | None:
+    entry = _test_log_for(session_id)
+    if entry is None:
+        return None
+    run_id, logger = entry
+    try:
+        logger.append_event(
+            run_id,
+            event_name,
+            session_id=session_id,
+            duration_ms=duration_ms,
+            details=details,
+        )
+        return None
+    except (OSError, TypeError, ValueError) as exc:
+        # Transcript/session state remains authoritative if local diagnostics fail.
+        return f"Local test log could not be written: {exc}"
+
+
+def _begin_test_call(session_id: str) -> None:
+    if _test_log_for(session_id) is None:
+        return
+    now = time.perf_counter()
+    with _sessions_lock:
+        previous_end = _test_last_call_end.get(session_id)
+    if previous_end is not None:
+        _append_test_event(session_id, "client_gap", duration_ms=max(0.0, (now - previous_end) * 1000))
+
+
+def _complete_test_call(session_id: str, started_at: float) -> None:
+    _append_test_event(session_id, "mcp_tool_call", duration_ms=max(0.0, (time.perf_counter() - started_at) * 1000))
+    with _sessions_lock:
+        _test_last_call_end[session_id] = time.perf_counter()
+
+
+def _fail_test_call(session_id: str, started_at: float, stage: str, exc: Exception) -> None:
+    if _test_log_for(session_id) is None:
+        return
+    _append_test_event(
+        session_id,
+        "operation_failed",
+        details={"stage": stage, "error_category": type(exc).__name__},
+    )
+    _complete_test_call(session_id, started_at)
+
+
 @mcp.tool()
 async def start_interview(resume_text: str, first_turn_json: str) -> dict:
-    """Start Backend Internship HR practice. Log every finalized answer using record_candidate_answer; follow the returned interview progress through automatic completion."""
+    """Start Backend Internship HR practice; save each answer before proposing its next question."""
     try:
         proposal = _decode(first_turn_json, "first_turn_json")
         model = HostProposalModel()
@@ -119,14 +181,184 @@ async def start_interview(resume_text: str, first_turn_json: str) -> dict:
             "next_action": "ask_next_question",
             "instruction": (
                 "Ask the opening question. After every finalized candidate answer, call "
-                "record_candidate_answer exactly once before asking anything else; use a "
-                "new event_id for each answer. Follow interview_progress and next_action. "
+                "save_candidate_answer exactly once using a new event_id. Briefly acknowledge "
+                "the saved answer, then formulate and submit one propose_next_turn for the returned "
+                "answer_event_id. Follow interview_progress and next_action. The compatibility tool "
+                "record_candidate_answer remains available for older clients. "
                 "At finish_interview, clearly tell the candidate the interview is complete, "
                 "then call finish_interview and give its validated practice report. Do not "
                 "expose scoring criteria or internal notes."
             ),
         }
     except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def start_test_interview(first_turn_json: str) -> dict:
+    """Start a resume-free synthetic interview and disclose local answer logging."""
+    started_at = time.perf_counter()
+    try:
+        proposal = _decode(first_turn_json, "first_turn_json")
+        model = HostProposalModel()
+        model.provide(proposal)
+        service = InterviewService(model=model)
+        session = await service.start(resume_text=SYNTHETIC_BACKEND_PROFILE, test_mode=True)
+        run_id = str(uuid.uuid4())
+        logger = TestRunLog(root=TEST_RUNS_DIR)
+        with _sessions_lock:
+            _sessions[session.id] = (service, model)
+            _test_runs[session.id] = (run_id, logger)
+            _test_run_ended.discard(session.id)
+            _test_logged_answers[session.id] = set()
+        log_warning = _append_test_event(
+            session.id,
+            "run_started",
+            details={"test_mode": True, "profile": "synthetic_backend_internship"},
+        )
+        if log_warning:
+            await service.delete(session.id)
+            with _sessions_lock:
+                _sessions.pop(session.id, None)
+                _test_runs.pop(session.id, None)
+                _test_logged_answers.pop(session.id, None)
+            return {"ok": False, "error": log_warning}
+        duration = (time.perf_counter() - started_at) * 1000
+        log_warning = _append_test_event(session.id, "mcp_tool_call", duration_ms=duration) or log_warning
+        with _sessions_lock:
+            _test_last_call_end[session.id] = time.perf_counter()
+        result = {
+            "ok": True,
+            **_public_session(session),
+            "test_mode": True,
+            "run_id": run_id,
+            "log_path": str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve()),
+            "next_action": "ask_next_question",
+            "instruction": (
+                "Это тестовое интервью с вымышленным профилем. Распознанные ответы будут сохранены "
+                "в локальный диагностический журнал этого прогона; настоящее резюме и данные кандидата "
+                "не используются. Задай вступительный вопрос. После каждого завершённого ответа сначала "
+                "сохрани его один раз, коротко подтверди запись и только затем предложи следующий вопрос. "
+                "Не раскрывай критерии оценки."
+            ),
+        }
+        if log_warning:
+            result["diagnostic_warning"] = log_warning
+        return result
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def save_candidate_answer(
+    session_id: str,
+    transcript: str,
+    event_id: str,
+    include_transcript: bool = False,
+) -> dict:
+    """Save one finalized voice answer before preparing a following question."""
+    started_at = time.perf_counter()
+    try:
+        with _sessions_lock:
+            pair = _sessions.get(session_id)
+        if pair is None:
+            raise ValueError("Interview session was not found")
+        service, _ = pair
+        _begin_test_call(session_id)
+        previous = await service.get_event_result(session_id, event_id)
+        save_started = time.perf_counter()
+        session = await service.persist_answer(session_id, transcript, event_id=event_id)
+        save_duration = (time.perf_counter() - save_started) * 1000
+        log_warning = None
+        with _sessions_lock:
+            answer_already_logged = event_id in _test_logged_answers.get(session_id, set())
+        if not answer_already_logged:
+            log_warning = _append_test_event(
+                session_id,
+                "answer_saved",
+                duration_ms=save_duration,
+                details={"event_id": event_id, "answer_text": transcript.strip()},
+            )
+            if log_warning is None and _test_log_for(session_id) is not None:
+                with _sessions_lock:
+                    _test_logged_answers.setdefault(session_id, set()).add(event_id)
+        progress = interview_progress(session.turns)
+        next_action = "finish_interview" if session.status == "awaiting_report" or progress["ready_to_finish"] else "propose_next_turn"
+        result = {
+            "ok": True,
+            "duplicate": previous is not None,
+            "status": session.status,
+            "interview_progress": progress,
+            "answer_event_id": event_id,
+            "next_action": next_action,
+            "instruction": (
+                "Кандидатский ответ сохранён. Коротко подтверди это до подготовки следующего вопроса. "
+                "Если next_action равен propose_next_turn, сформулируй один следующий вопрос и вызови "
+                "propose_next_turn для возвращённого answer_event_id. Если next_action равен finish_interview, "
+                "не задавай вопрос и подготовь отчёт."
+            ),
+        }
+        result.update(_public_delta(session, include_transcript=include_transcript))
+        if include_transcript:
+            result.update(_public_session(session))
+        if log_warning:
+            result["diagnostic_warning"] = log_warning
+        _complete_test_call(session_id, started_at)
+        return result
+    except (InterviewError, ValueError) as exc:
+        _fail_test_call(session_id, started_at, "answer_save", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def propose_next_turn(
+    session_id: str,
+    answer_event_id: str,
+    next_turn_json: str,
+) -> dict:
+    """Validate and store the next interviewer turn after its answer is durable."""
+    started_at = time.perf_counter()
+    try:
+        with _sessions_lock:
+            pair = _sessions.get(session_id)
+        if pair is None:
+            raise ValueError("Interview session was not found")
+        service, _ = pair
+        _begin_test_call(session_id)
+        proposal = _decode(next_turn_json, "next_turn_json")
+        before = await service.get_session(session_id)
+        accepted_before = answer_event_id in before.proposal_payloads
+        validation_started = time.perf_counter()
+        session = await service.propose_next_turn(session_id, answer_event_id, proposal)
+        validation_duration = (time.perf_counter() - validation_started) * 1000
+        progress = interview_progress(session.turns)
+        warning = None
+        if not accepted_before:
+            warning = _append_test_event(
+                session_id,
+                "question_proposal_accepted",
+                details={"answer_event_id": answer_event_id},
+            )
+            _append_test_event(
+                session_id,
+                "proposal_validation",
+                duration_ms=validation_duration,
+                details={"answer_event_id": answer_event_id},
+            )
+        result = {
+            "ok": True,
+            "status": session.status,
+            "interview_progress": progress,
+            "next_action": "finish_interview" if progress["ready_to_finish"] else "ask_next_question",
+            "instruction": "Ask the returned next_turn only when next_action is ask_next_question.",
+        }
+        result.update(_public_delta(session, include_transcript=False))
+        _complete_test_call(session_id, started_at)
+        if warning:
+            result["diagnostic_warning"] = warning
+        return result
+    except (InterviewError, ValueError) as exc:
+        _fail_test_call(session_id, started_at, "proposal_validation", exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -239,26 +471,63 @@ async def record_candidate_answer(
 @mcp.tool()
 async def finish_interview(session_id: str, report_json: str) -> dict:
     """Finish the interview and validate its evidence-based training report."""
+    tool_started = time.perf_counter()
     try:
         with _sessions_lock:
             pair = _sessions.get(session_id)
         if pair is None:
             raise ValueError("Interview session was not found")
         service, model = pair
+        test_run = _test_log_for(session_id)
+        _begin_test_call(session_id)
         async with model.response_lock:
             model.provide(_decode(report_json, "report_json"))
+            validation_started = time.perf_counter()
             session = await service.finish(session_id)
+        validation_duration = (time.perf_counter() - validation_started) * 1000
+        if test_run:
+            _append_test_event(session_id, "report_validation", duration_ms=validation_duration)
+        markdown_started = time.perf_counter()
+        report_markdown = render_report_markdown(session.report, session.turns)
+        markdown_duration = (time.perf_counter() - markdown_started) * 1000
+        if test_run:
+            _append_test_event(session_id, "markdown_render", duration_ms=markdown_duration)
+        pdf_started = time.perf_counter()
         try:
             files = await asyncio.to_thread(
-                export_report_files, session.report, session.turns, session.id, output_dir=REPORTS_DIR
+                export_report_files,
+                session.report,
+                session.turns,
+                session.id,
+                output_dir=REPORTS_DIR,
+                markdown=report_markdown,
             )
-            report_markdown = files["markdown"]
             report_files = {"markdown_path": files["markdown_path"], "pdf_path": files["pdf_path"]}
             export_error = None
         except ReportExportError as exc:
-            report_markdown = render_report_markdown(session.report, session.turns)
             report_files = None
             export_error = str(exc)
+            if test_run:
+                _append_test_event(session_id, "pdf_export_failed", details={"error_category": "report_export"})
+        pdf_duration = (time.perf_counter() - pdf_started) * 1000
+        if test_run:
+            _append_test_event(session_id, "pdf_export", duration_ms=pdf_duration)
+            with _sessions_lock:
+                first_finish = session_id not in _test_run_ended
+                if first_finish:
+                    _test_run_ended.add(session_id)
+            _complete_test_call(session_id, tool_started)
+            run_end_warning = None
+            if first_finish:
+                run_end_warning = _append_test_event(
+                    session_id,
+                    "run_ended",
+                    details={"status": session.status, "export_succeeded": report_files is not None},
+                )
+            run_id, _ = test_run
+            log_path = str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve())
+        else:
+            log_path = None
         return {
             "ok": True,
             **_public_session(session, include_transcript=False),
@@ -266,6 +535,8 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             "report_markdown": report_markdown,
             "report_files": report_files,
             "report_export_error": export_error,
+            "test_run_log_path": log_path,
+            "diagnostic_warning": run_end_warning if test_run else None,
             "instruction": (
                 "Tell the candidate clearly in their language that the interview is complete "
                 "(for example, say ‘Интервью завершено’), display report_markdown visibly in "
@@ -276,6 +547,7 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             ),
         }
     except (InterviewError, ValueError) as exc:
+        _fail_test_call(session_id, tool_started, "report_validation", exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -306,6 +578,14 @@ async def cancel_interview(session_id: str) -> dict:
         await service.delete(session_id)
         with _sessions_lock:
             _sessions.pop(session_id, None)
+            is_test_run = session_id in _test_runs
+        if is_test_run:
+            _append_test_event(session_id, "run_ended", details={"status": "cancelled"})
+            with _sessions_lock:
+                _test_runs.pop(session_id, None)
+                _test_last_call_end.pop(session_id, None)
+                _test_run_ended.discard(session_id)
+                _test_logged_answers.pop(session_id, None)
         return {"ok": True, "status": session.status, "deleted": True}
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
@@ -321,13 +601,29 @@ async def delete_interview(session_id: str) -> dict:
             raise ValueError("Interview session was not found")
         service, _ = pair
         await service.delete(session_id)
+        with _sessions_lock:
+            _test_runs.pop(session_id, None)
+            _test_last_call_end.pop(session_id, None)
+            _test_run_ended.discard(session_id)
+            _test_logged_answers.pop(session_id, None)
         return {"ok": True, "deleted": True}
     except (InterviewError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
 
 
 def run_server():
+    TestRunLog(root=TEST_RUNS_DIR).prune_expired_logs()
     mcp.run(transport="stdio")
+
+
+@mcp.tool()
+def clear_test_run_logs() -> dict:
+    """Delete local test-interview logs without touching reports or voice-probe logs."""
+    try:
+        deleted = TestRunLog(root=TEST_RUNS_DIR).clear_test_run_logs()
+        return {"ok": True, "deleted_logs": deleted}
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not clear test-run logs: {exc}"}
 
 
 if __name__ == "__main__":

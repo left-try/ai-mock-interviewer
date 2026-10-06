@@ -30,10 +30,14 @@ class InterviewSession:
     id: str
     status: str
     resume_text: str
+    test_mode: bool = False
     turns: list[Turn] = field(default_factory=list)
     report: InterviewReport | None = None
     event_results: dict[str, "InterviewSession"] = field(default_factory=dict, repr=False)
     follow_ups: dict[str, int] = field(default_factory=dict, repr=False)
+    pending_answer_event_id: str | None = None
+    event_payloads: dict[str, str] = field(default_factory=dict, repr=False)
+    proposal_payloads: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     version: int = 0
 
 
