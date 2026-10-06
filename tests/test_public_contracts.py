@@ -109,15 +109,21 @@ async def test_finish_returns_report_and_marks_session_completed():
     ]
     service = service_for(
         next_question("motivation", "Почему backend?"),
+        next_question("personal_contribution", "Какую часть проекта вы реализовали лично?"),
         report(evidence=evidence),
     )
     session = await service.start(resume_text="Учебный API")
+    session = await service.submit_answer(
+        session.id,
+        "Я реализовал маршруты и подключил базу данных.",
+    )
     finished = await service.finish(session.id)
 
     assert finished.status == "completed"
     assert finished.report is not None
     assert finished.report.disclaimer
-    assert finished.report.evidence[0].source_turn_id == "turn-2"
+    assert finished.report.evidence[0]["source_turn_id"] == "turn-2"
+    assert finished.report.evidence[0]["quote"] == "Я реализовал маршруты и подключил базу данных."
 
 
 @pytest.mark.asyncio
