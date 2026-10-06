@@ -38,6 +38,14 @@ Do not use a real CV or sensitive personal information. The server writes transc
 
 This does not validate raw audio access, partial transcripts, speech latency, interruption timing, or reliable automatic tool use during a real interview. Codex Voice owns those behaviors.
 
+## Resume-free interview and diagnostics
+
+Start `/test-backend-interview` in Codex Voice. The server uses a fictional Backend Internship profile and does not inspect attached resumes. Before the opening question, it discloses that recognized answers are saved in a local per-run JSONL log under `%LOCALAPPDATA%\ai-mock-interviewer\test-runs`. Logs are retained for 30 days. `clear_test_run_logs` removes test-run logs without touching report or voice-probe files.
+
+Analyze a log with `python scripts/summarize_test_run.py <log.jsonl>`. The summary reports distinct MCP stages and percentiles when there are at least five samples. `client_gap_ms` measures time between MCP calls and may include speech, recognition, and host work; it is not model thinking time or voice TTFT.
+
+In the answer-first interview protocol, `save_candidate_answer` stores each finalized answer, the host acknowledges it, and `propose_next_turn` stores the next question. The older `record_candidate_answer` tool remains for compatibility. The report announces completion only after validation succeeds and contains data-derived topic coverage and individual score bars, without a hiring probability.
+
 ## Interview tools
 
 The same MCP server publishes `start_interview`, `record_candidate_answer`, `interview_status`, `finish_interview`, `cancel_interview`, and `delete_interview`. Session state is held in memory. The Codex Voice host supplies structured next-turn and report proposals, so it can use its subscription model without an application API key. The service validates each proposal and prevents duplicate event IDs from adding another answer. It does not receive raw audio.
