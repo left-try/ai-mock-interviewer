@@ -9,6 +9,7 @@ from collections.abc import Iterable
 
 _METRIC_NAMES = {
     "answer_save": "answer_save_duration_ms",
+    "answer_saved": "answer_save_duration_ms",
     "proposal_validation": "proposal_validation_duration_ms",
     "report_validation": "report_validation_duration_ms",
     "markdown_render": "markdown_render_duration_ms",

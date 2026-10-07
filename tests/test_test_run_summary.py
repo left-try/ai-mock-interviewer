@@ -52,6 +52,12 @@ def test_summary_marks_small_samples_preliminary_and_single_sample_is_not_a_perc
     assert "preliminary" in metric["note"].lower()
 
 
+def test_answer_saved_lifecycle_events_also_contribute_to_answer_save_timing():
+    summary = _summarizer()([json.dumps(_event("answer_saved", duration=3.25))])
+
+    assert summary["metrics"]["answer_save_duration_ms"]["samples_ms"] == [3.25]
+
+
 def test_summary_handles_no_timing_samples_and_missing_run_end():
     summary = _summarizer()([json.dumps(_event("run_started"))])
 

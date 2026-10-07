@@ -108,6 +108,19 @@ def _public_session(session, *, include_transcript=True):
     return result
 
 
+def _opening_script(question: str, *, test_mode: bool) -> str:
+    disclosure = (
+        "Это синтетическое собеседование на стажировку backend-разработчика; распознанные ответы "
+        "сохраняются в локальном диагностическом журнале. "
+        if test_mode
+        else "Это тренировочное интервью на стажировку backend-разработчика. "
+    )
+    return (
+        f"Здравствуйте! {disclosure}Представим, что мы — продуктовая команда онлайн-магазина и развиваем "
+        f"API каталога, заказов и оплаты. Поговорим о вашем опыте и инженерных решениях. Начнём: {question}"
+    )
+
+
 def _next_action(session, progress):
     if session.status == "awaiting_report" or progress["ready_to_finish"]:
         return "finish_interview"
@@ -179,15 +192,18 @@ async def start_interview(resume_text: str, first_turn_json: str) -> dict:
         return {
             "ok": True,
             **_public_session(session),
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=False),
             "next_action": "ask_next_question",
             "instruction": (
-                "Ask the opening question once. After every finalized candidate answer, call "
-                "save_candidate_answer exactly once using a new event_id. Send one short acknowledgment "
-                "that does not contain or rephrase the next question, then formulate and submit one "
-                "propose_next_turn for the returned answer_event_id. Ask the returned next_turn exactly "
-                "once, and only after propose_next_turn succeeds. Never repeat it in a second message. "
-                "Follow interview_progress and next_action. The compatibility tool "
-                "record_candidate_answer remains available for older clients. "
+                "Speak opening_script as one opening; the first question is already included, so do not "
+                "repeat next_turn separately. After each finalized answer, if useful, say only a brief "
+                "neutral transition such as 'Спасибо за ответ. Секунду.' Then call "
+                "record_candidate_answer once with the exact transcript, a new event_id, and one "
+                "host-authored next_turn_json. The server stores the answer before validating the "
+                "proposed question. After success, ask the returned next_turn exactly once. Never "
+                "repeat or paraphrase it in a neighboring message. If answer_saved is true and "
+                "next_action is propose_next_turn, retry only that proposal with the same answer_event_id. "
+                "Follow interview_progress and next_action. "
                 "At finish_interview, clearly tell the candidate the interview is complete, "
                 "then call finish_interview and give its validated practice report. Do not "
                 "expose scoring criteria or internal notes."
@@ -234,16 +250,19 @@ async def start_test_interview(first_turn_json: str) -> dict:
             "ok": True,
             **_public_session(session),
             "test_mode": True,
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=True),
             "run_id": run_id,
             "log_path": str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve()),
             "next_action": "ask_next_question",
             "instruction": (
-                "Это тестовое интервью с вымышленным профилем. Распознанные ответы будут сохранены "
-                "в локальный диагностический журнал этого прогона; настоящее резюме и данные кандидата "
-                "не используются. Задай вступительный вопрос один раз. После каждого завершённого ответа "
-                "сохрани его один раз, затем отправь короткое подтверждение, которое не содержит и не "
-                "переформулирует следующий вопрос. Только после успешного propose_next_turn задай ровно "
-                "один раз возвращённый next_turn; не дублируй его в соседней реплике. "
+                "Произнеси opening_script целиком: он содержит раскрытие тестового режима и первый вопрос. "
+                "После каждого завершённого ответа, если уместно, произнеси короткое нейтральное "
+                "'Спасибо за ответ. Секунду.' Затем одним вызовом record_candidate_answer передай "
+                "точную транскрипцию, новый event_id и один следующий вопрос в next_turn_json. Сервер "
+                "сначала сохранит ответ, затем проверит вопрос. После успешного вызова задай возвращённый "
+                "next_turn ровно один раз. Не дублируй и не перефразируй вопрос в соседней реплике. "
+                "Если ответ сохранён, но предложение вопроса отклонено, повтори только propose_next_turn "
+                "с тем же answer_event_id. "
                 "Не раскрывай критерии оценки."
             ),
         }
@@ -380,7 +399,10 @@ async def record_candidate_answer(
     next_turn_json: str = "",
     include_transcript: bool = True,
 ) -> dict:
-    """Record one finalized answer; the result says whether to ask another question or finish."""
+    """Record one finalized answer and validate its next question in a single voice round-trip."""
+    started_at = time.perf_counter()
+    _begin_test_call(session_id)
+    answer_saved = False
     try:
         with _sessions_lock:
             pair = _sessions.get(session_id)
@@ -392,23 +414,38 @@ async def record_candidate_answer(
             previous = await service.get_event_result(session_id, event_id)
             if previous is not None:
                 prior_progress = interview_progress(previous.turns)
+                proposal_pending = previous.pending_answer_event_id == event_id
                 result = {
                     "ok": True,
                     "duplicate": True,
-                    "next_action": _next_action(previous, prior_progress),
+                    "next_action": "propose_next_turn" if proposal_pending else _next_action(previous, prior_progress),
                     "interview_progress": prior_progress,
                 }
+                if proposal_pending:
+                    result.update({
+                        "answer_saved": True,
+                        "answer_event_id": event_id,
+                        "instruction": "The answer is already saved. Retry only propose_next_turn with this answer_event_id.",
+                    })
                 result.update(_public_delta(previous, include_transcript=include_transcript))
                 if include_transcript:
                     result.update(_public_session(previous))
                 return result
             before = await service.get_session(session_id)
             if before.status == "awaiting_report":
+                save_started = time.perf_counter()
                 session = await service.submit_answer(
                     session_id,
                     transcript,
                     event_id=event_id,
                     allow_final_correction=True,
+                )
+                answer_saved = True
+                _append_test_event(
+                    session_id,
+                    "answer_saved",
+                    duration_ms=(time.perf_counter() - save_started) * 1000,
+                    details={"event_id": event_id, "answer_text": transcript.strip()},
                 )
                 progress = interview_progress(session.turns)
                 result = {
@@ -429,11 +466,19 @@ async def record_candidate_answer(
                 return result
             anticipated_progress = interview_progress(before.turns, pending_answer=True)
             if anticipated_progress["ready_to_finish"]:
+                save_started = time.perf_counter()
                 session = await service.submit_answer(
                     session_id,
                     transcript,
                     event_id=event_id,
                     finish_after_answer=True,
+                )
+                answer_saved = True
+                _append_test_event(
+                    session_id,
+                    "answer_saved",
+                    duration_ms=(time.perf_counter() - save_started) * 1000,
+                    details={"event_id": event_id, "answer_text": transcript.strip()},
                 )
                 result = {
                     "ok": True,
@@ -454,8 +499,29 @@ async def record_candidate_answer(
             if not next_turn_json:
                 raise ValueError("next_turn_json is required until the interview is ready to finish")
             proposal = _decode(next_turn_json, "next_turn_json")
-            model.provide(proposal)
-            session = await service.submit_answer(session_id, transcript, event_id=event_id)
+            save_started = time.perf_counter()
+            session = await service.persist_answer(session_id, transcript, event_id=event_id)
+            answer_saved = True
+            _append_test_event(
+                session_id,
+                "answer_saved",
+                duration_ms=(time.perf_counter() - save_started) * 1000,
+                details={"event_id": event_id, "answer_text": transcript.strip()},
+            )
+            validation_started = time.perf_counter()
+            session = await service.propose_next_turn(session_id, event_id, proposal)
+            validation_duration = (time.perf_counter() - validation_started) * 1000
+            _append_test_event(
+                session_id,
+                "question_proposal_accepted",
+                details={"answer_event_id": event_id},
+            )
+            _append_test_event(
+                session_id,
+                "proposal_validation",
+                duration_ms=validation_duration,
+                details={"answer_event_id": event_id},
+            )
             progress = interview_progress(session.turns)
         result = {
             "ok": True,
@@ -463,9 +529,9 @@ async def record_candidate_answer(
             "interview_progress": progress,
             "next_action": _next_action(session, progress),
             "instruction": (
-                "The transcript was stored once. Use the returned candidate_turn and next_turn "
-                "only; do not request or restate the full transcript. Do not include the next question "
-                "in the acknowledgment. Ask next_turn exactly once and only when "
+                "The transcript was stored once and the proposal validated. Use the returned "
+                "candidate_turn and next_turn only; do not request or restate the full transcript. "
+                "Ask next_turn exactly once and only when "
                 "next_action is ask_next_question. If next_action is finish_interview, tell "
                 "the candidate the questions are complete and you are preparing the final "
                 "report, then call finish_interview; announce full completion only after it succeeds."
@@ -476,7 +542,31 @@ async def record_candidate_answer(
             result.update(_public_session(session))
         return result
     except (InterviewError, ValueError) as exc:
-        return {"ok": False, "error": str(exc)}
+        with _sessions_lock:
+            pair = _sessions.get(session_id)
+        pending = False
+        if answer_saved and pair is not None:
+            current = await pair[0].get_session(session_id)
+            pending = current.pending_answer_event_id == event_id
+        _append_test_event(
+            session_id,
+            "operation_failed",
+            details={
+                "stage": "question_proposal" if pending else "answer_recording",
+                "error_category": type(exc).__name__,
+            },
+        )
+        result = {"ok": False, "error": str(exc)}
+        if pending:
+            result.update({
+                "answer_saved": True,
+                "answer_event_id": event_id,
+                "next_action": "propose_next_turn",
+                "instruction": "The answer is already saved. Retry only propose_next_turn with this answer_event_id.",
+            })
+        return result
+    finally:
+        _complete_test_call(session_id, started_at)
 
 
 @mcp.tool()
