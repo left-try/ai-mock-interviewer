@@ -117,6 +117,16 @@ async def test_combined_voice_turn_leaves_invalid_question_proposal_retryable():
         assert failed["answer_event_id"] == "retryable-answer-1"
         assert failed["next_action"] == "propose_next_turn"
 
+        duplicate = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend.",
+            event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        )
+        assert duplicate["duplicate"] is True
+        assert duplicate["answer_saved"] is True
+        assert duplicate["next_action"] == "propose_next_turn"
+
         retried = await bridge.propose_next_turn(
             session_id=session_id,
             answer_event_id="retryable-answer-1",

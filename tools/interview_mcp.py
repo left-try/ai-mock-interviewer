@@ -414,12 +414,19 @@ async def record_candidate_answer(
             previous = await service.get_event_result(session_id, event_id)
             if previous is not None:
                 prior_progress = interview_progress(previous.turns)
+                proposal_pending = previous.pending_answer_event_id == event_id
                 result = {
                     "ok": True,
                     "duplicate": True,
-                    "next_action": _next_action(previous, prior_progress),
+                    "next_action": "propose_next_turn" if proposal_pending else _next_action(previous, prior_progress),
                     "interview_progress": prior_progress,
                 }
+                if proposal_pending:
+                    result.update({
+                        "answer_saved": True,
+                        "answer_event_id": event_id,
+                        "instruction": "The answer is already saved. Retry only propose_next_turn with this answer_event_id.",
+                    })
                 result.update(_public_delta(previous, include_transcript=include_transcript))
                 if include_transcript:
                     result.update(_public_session(previous))
