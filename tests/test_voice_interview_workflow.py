@@ -35,6 +35,37 @@ def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
     assert "report_markdown" in instructions
     assert ".pdf" in instructions
     assert "preparing the final report" in instructions.lower()
+    assert "does not contain or rephrase the next question" in instructions.lower()
+    assert "ask the returned next_turn exactly once" in instructions.lower()
+    assert "test_run_summary" in instructions
+
+
+@pytest.mark.asyncio
+async def test_voice_turn_instructions_keep_acknowledgment_separate_and_ask_once(tmp_path, monkeypatch):
+    bridge, _ = _voice_modules()
+    monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+    session_id = started["session_id"]
+
+    saved = await bridge.save_candidate_answer(
+        session_id=session_id,
+        transcript="Хочу развивать backend.",
+        event_id="answer-before-question",
+    )
+
+    assert saved["ok"] is True
+    assert "не включай и не переформулируй следующий вопрос" in saved["instruction"].lower()
+
+    proposed = await bridge.propose_next_turn(
+        session_id=session_id,
+        answer_event_id=saved["answer_event_id"],
+        next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+    )
+
+    assert proposed["ok"] is True
+    assert "ask the returned next_turn exactly once" in proposed["instruction"].lower()
 
 
 @pytest.mark.asyncio

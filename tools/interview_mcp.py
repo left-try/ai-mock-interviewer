@@ -23,6 +23,7 @@ from mock_interviewer.report_export import (
 from mock_interviewer.service import InterviewService
 from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILE
 from mock_interviewer.test_run_log import TestRunLog, default_test_runs_dir
+from mock_interviewer.test_run_summary import summarize_events
 
 
 class HostProposalModel:
@@ -180,10 +181,12 @@ async def start_interview(resume_text: str, first_turn_json: str) -> dict:
             **_public_session(session),
             "next_action": "ask_next_question",
             "instruction": (
-                "Ask the opening question. After every finalized candidate answer, call "
-                "save_candidate_answer exactly once using a new event_id. Briefly acknowledge "
-                "the saved answer, then formulate and submit one propose_next_turn for the returned "
-                "answer_event_id. Follow interview_progress and next_action. The compatibility tool "
+                "Ask the opening question once. After every finalized candidate answer, call "
+                "save_candidate_answer exactly once using a new event_id. Send one short acknowledgment "
+                "that does not contain or rephrase the next question, then formulate and submit one "
+                "propose_next_turn for the returned answer_event_id. Ask the returned next_turn exactly "
+                "once, and only after propose_next_turn succeeds. Never repeat it in a second message. "
+                "Follow interview_progress and next_action. The compatibility tool "
                 "record_candidate_answer remains available for older clients. "
                 "At finish_interview, clearly tell the candidate the interview is complete, "
                 "then call finish_interview and give its validated practice report. Do not "
@@ -237,8 +240,10 @@ async def start_test_interview(first_turn_json: str) -> dict:
             "instruction": (
                 "Это тестовое интервью с вымышленным профилем. Распознанные ответы будут сохранены "
                 "в локальный диагностический журнал этого прогона; настоящее резюме и данные кандидата "
-                "не используются. Задай вступительный вопрос. После каждого завершённого ответа сначала "
-                "сохрани его один раз, коротко подтверди запись и только затем предложи следующий вопрос. "
+                "не используются. Задай вступительный вопрос один раз. После каждого завершённого ответа "
+                "сохрани его один раз, затем отправь короткое подтверждение, которое не содержит и не "
+                "переформулирует следующий вопрос. Только после успешного propose_next_turn задай ровно "
+                "один раз возвращённый next_turn; не дублируй его в соседней реплике. "
                 "Не раскрывай критерии оценки."
             ),
         }
@@ -292,9 +297,11 @@ async def save_candidate_answer(
             "answer_event_id": event_id,
             "next_action": next_action,
             "instruction": (
-                "Кандидатский ответ сохранён. Коротко подтверди это до подготовки следующего вопроса. "
+                "Кандидатский ответ сохранён. Коротко подтверди сохранение, но не включай и не "
+                "переформулируй следующий вопрос в подтверждении. "
                 "Если next_action равен propose_next_turn, сформулируй один следующий вопрос и вызови "
-                "propose_next_turn для возвращённого answer_event_id. Если next_action равен finish_interview, "
+                "propose_next_turn для возвращённого answer_event_id; только после успешного вызова "
+                "задай возвращённый next_turn ровно один раз. Если next_action равен finish_interview, "
                 "не задавай вопрос и подготовь отчёт."
             ),
         }
@@ -350,7 +357,10 @@ async def propose_next_turn(
             "status": session.status,
             "interview_progress": progress,
             "next_action": "finish_interview" if progress["ready_to_finish"] else "ask_next_question",
-            "instruction": "Ask the returned next_turn only when next_action is ask_next_question.",
+            "instruction": (
+                "If next_action is ask_next_question, ask the returned next_turn exactly once. "
+                "Do not repeat or rephrase it in another message."
+            ),
         }
         result.update(_public_delta(session, include_transcript=False))
         _complete_test_call(session_id, started_at)
@@ -454,7 +464,8 @@ async def record_candidate_answer(
             "next_action": _next_action(session, progress),
             "instruction": (
                 "The transcript was stored once. Use the returned candidate_turn and next_turn "
-                "only; do not request or restate the full transcript. Ask next_turn only when "
+                "only; do not request or restate the full transcript. Do not include the next question "
+                "in the acknowledgment. Ask next_turn exactly once and only when "
                 "next_action is ask_next_question. If next_action is finish_interview, tell "
                 "the candidate the questions are complete and you are preparing the final "
                 "report, then call finish_interview; announce full completion only after it succeeds."
@@ -479,6 +490,8 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             raise ValueError("Interview session was not found")
         service, model = pair
         test_run = _test_log_for(session_id)
+        test_run_summary = None
+        diagnostic_warning = None
         _begin_test_call(session_id)
         async with model.response_lock:
             model.provide(_decode(report_json, "report_json"))
@@ -526,6 +539,13 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
                 )
             run_id, _ = test_run
             log_path = str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve())
+            diagnostic_warning = run_end_warning
+            try:
+                test_run_summary = summarize_events(
+                    Path(log_path).read_text(encoding="utf-8").splitlines()
+                )
+            except (OSError, UnicodeError) as exc:
+                diagnostic_warning = diagnostic_warning or f"Local test timing summary could not be read: {exc}"
         else:
             log_path = None
         return {
@@ -536,14 +556,17 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             "report_files": report_files,
             "report_export_error": export_error,
             "test_run_log_path": log_path,
-            "diagnostic_warning": run_end_warning if test_run else None,
+            "test_run_summary": test_run_summary,
+            "diagnostic_warning": diagnostic_warning,
             "instruction": (
                 "Tell the candidate clearly in their language that the interview is complete "
                 "(for example, say ‘Интервью завершено’), display report_markdown visibly in "
                 "the chat, and provide the Markdown and PDF report_files. If report_export_error "
                 "is present, still display the validated Markdown report and clearly explain "
                 "that the file exports could not be saved. If recommendation is insufficient_data, "
-                "explain that evidence was limited. Do not claim a hiring decision."
+                "explain that evidence was limited. If test_run_summary is present, summarize its "
+                "timings and state that client_gap includes speech, recognition, and client work, "
+                "not model thinking time. Do not claim a hiring decision."
             ),
         }
     except (InterviewError, ValueError) as exc:
