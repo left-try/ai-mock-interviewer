@@ -38,34 +38,94 @@ def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
     assert "does not contain or rephrase the next question" in instructions.lower()
     assert "ask the returned next_turn exactly once" in instructions.lower()
     assert "test_run_summary" in instructions
+    assert "one call" in instructions.lower()
 
 
 @pytest.mark.asyncio
-async def test_voice_turn_instructions_keep_acknowledgment_separate_and_ask_once(tmp_path, monkeypatch):
+async def test_voice_turn_uses_one_mcp_call_and_speaks_opening_once(tmp_path, monkeypatch):
     bridge, _ = _voice_modules()
     monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
     started = await bridge.start_test_interview(
         first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
     )
     session_id = started["session_id"]
+    assert "стажировку backend-разработчика" in started["opening_script"].lower()
+    assert "онлайн-магазина" in started["opening_script"].lower()
+    assert "почему backend?" in started["opening_script"].lower()
 
-    saved = await bridge.save_candidate_answer(
+    result = await bridge.record_candidate_answer(
         session_id=session_id,
         transcript="Хочу развивать backend.",
         event_id="answer-before-question",
-    )
-
-    assert saved["ok"] is True
-    assert "не включай и не переформулируй следующий вопрос" in saved["instruction"].lower()
-
-    proposed = await bridge.propose_next_turn(
-        session_id=session_id,
-        answer_event_id=saved["answer_event_id"],
         next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        include_transcript=False,
     )
 
-    assert proposed["ok"] is True
-    assert "ask the returned next_turn exactly once" in proposed["instruction"].lower()
+    assert result["ok"] is True
+    assert result["candidate_turn"]["text"] == "Хочу развивать backend."
+    assert result["next_turn"]["text"] == "Что вы изучаете?"
+    assert "ask next_turn exactly once" in result["instruction"].lower()
+
+
+@pytest.mark.asyncio
+async def test_combined_voice_turn_logs_answer_and_proposal_stage_timings(tmp_path, monkeypatch):
+    bridge, _ = _voice_modules()
+    monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+
+    try:
+        result = await bridge.record_candidate_answer(
+            session_id=started["session_id"],
+            transcript="Хочу создавать backend-сервисы.",
+            event_id="timed-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+            include_transcript=False,
+        )
+
+        assert result["ok"] is True
+        events = [json.loads(line) for line in Path(started["log_path"]).read_text(encoding="utf-8").splitlines()]
+        answer_saved = next(event for event in events if event["event_name"] == "answer_saved")
+        proposal_validated = next(event for event in events if event["event_name"] == "proposal_validation")
+        combined_call = [event for event in events if event["event_name"] == "mcp_tool_call"][-1]
+        assert answer_saved["duration_ms"] >= 0
+        assert proposal_validated["duration_ms"] >= 0
+        assert combined_call["duration_ms"] >= 0
+        assert events.index(answer_saved) < events.index(proposal_validated)
+    finally:
+        await bridge.delete_interview(started["session_id"])
+
+
+@pytest.mark.asyncio
+async def test_combined_voice_turn_leaves_invalid_question_proposal_retryable():
+    bridge, _ = _voice_modules()
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+    session_id = started["session_id"]
+
+    try:
+        failed = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend.",
+            event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"unknown","text":"Что вы изучаете?"}',
+        )
+        assert failed["ok"] is False
+        assert failed["answer_saved"] is True
+        assert failed["answer_event_id"] == "retryable-answer-1"
+        assert failed["next_action"] == "propose_next_turn"
+
+        retried = await bridge.propose_next_turn(
+            session_id=session_id,
+            answer_event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        )
+        assert retried["ok"] is True
+        assert retried["next_turn"]["text"] == "Что вы изучаете?"
+    finally:
+        await bridge.delete_interview(session_id)
 
 
 @pytest.mark.asyncio
