@@ -223,7 +223,7 @@ def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path) -> None:
     styles.add(ParagraphStyle(name="ReportTitleRu", parent=styles["Title"], fontName=font_name, alignment=TA_CENTER, fontSize=18, leading=23, textColor=colors.HexColor("#17324D"), spaceAfter=8 * mm))
     styles.add(ParagraphStyle(name="ReportHeadingRu", parent=styles["Heading2"], fontName=font_name, fontSize=13, leading=17, textColor=colors.HexColor("#17324D"), spaceBefore=5 * mm, spaceAfter=2 * mm))
     styles.add(ParagraphStyle(name="ReportBodyRu", parent=styles["BodyText"], fontName=font_name, fontSize=9.5, leading=14, spaceAfter=2 * mm))
-    styles.add(ParagraphStyle(name="ReportQuoteRu", parent=styles["BodyText"], fontName=font_name, fontSize=9, leading=13, leftIndent=5 * mm, borderColor=colors.HexColor("#CBD5E1"), borderWidth=0.7, borderPadding=4 * mm, backColor=colors.HexColor("#F5F8FB"), spaceAfter=2 * mm))
+    styles.add(ParagraphStyle(name="ReportQuoteRu", parent=styles["BodyText"], fontName=font_name, fontSize=9, leading=13, textColor=colors.HexColor("#334155")))
     covered, required, missing = _coverage_data(turns)
     verdict_color = {
         "strong_signal": "#DCEFE5",
@@ -279,7 +279,25 @@ def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path) -> None:
         for index, raw_item in enumerate(report.evidence):
             item = _as_mapping(raw_item)
             title = f"{CRITERION_LABELS.get(item.get('criterion', ''), item.get('criterion', ''))} · {labels.get(item.get('source_turn_id'), 'Источник не указан')}"
-            quote = Paragraph(html.escape(str(item.get("quote", ""))).replace("\n", "<br/>"), styles["ReportQuoteRu"])
+            quote_text = Paragraph(
+                html.escape(str(item.get("quote", ""))).replace("\n", "<br/>"),
+                styles["ReportQuoteRu"],
+            )
+            quote = Table(
+                [[quote_text]],
+                colWidths=[A4[0] - 44 * mm],
+                splitByRow=1,
+                splitInRow=1,
+                hAlign="LEFT",
+            )
+            quote.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F8FB")),
+                ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#CBD5E1")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("TOPPADDING", (0, 0), (-1, -1), 4 * mm),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4 * mm),
+            ]))
             if index == 0:
                 story.append(KeepTogether([
                     Paragraph("Подтверждения", styles["ReportHeadingRu"]),

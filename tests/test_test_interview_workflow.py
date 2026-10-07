@@ -200,6 +200,8 @@ async def test_early_stop_produces_report_files_and_complete_diagnostic_log(tmp_
     assert Path(result["report_files"]["markdown_path"]).exists()
     assert Path(result["report_files"]["pdf_path"]).exists()
     assert Path(result["test_run_log_path"]).exists()
+    assert result["test_run_summary"]["event_counts"]["run_ended"] == 1
+    assert result["test_run_summary"]["metrics"]["mcp_tool_call_duration_ms"]["count"] >= 2
     events = [
         json.loads(line)
         for line in Path(result["test_run_log_path"]).read_text(encoding="utf-8").splitlines()
