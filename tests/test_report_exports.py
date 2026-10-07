@@ -167,3 +167,46 @@ def test_pdf_long_evidence_and_disclaimer_remain_searchable_across_pages(tmp_pat
     assert " ".join(long_quote[:100].split()) in normalized_pdf_text
     assert " ".join(long_observation[:100].split()) in normalized_pdf_text
     assert "это не решение о найме" in normalized_pdf_text
+
+
+def test_pdf_quote_block_does_not_overlap_its_source_label(tmp_path: Path):
+    long_quote = "Это подробный кандидатский ответ. " * 90
+    report = InterviewReport(
+        recommendation="mixed_signal",
+        scores={"motivation": 4},
+        strengths=[],
+        growth_areas=[],
+        evidence=[{
+            "criterion": "motivation",
+            "source_turn_id": "turn-2",
+            "quote": long_quote,
+            "observation": "Короткое наблюдение.",
+        }],
+        uncertainties=[],
+        disclaimer="Учебная обратная связь для практики.",
+    )
+    turns = [
+        Turn("turn-1", "interviewer", "Почему backend?", topic_id="motivation"),
+        Turn("turn-2", "candidate", long_quote),
+    ]
+    files = export_report_files(report, turns, "quote-spacing", output_dir=tmp_path)
+    reader = PdfReader(files["pdf_path"])
+
+    page_gap = None
+    for page in reader.pages:
+        positions = {}
+
+        def capture(text, current_matrix, text_matrix, font_dict, font_size):
+            baseline_y = text_matrix[5] * current_matrix[3] + current_matrix[5]
+            if "Мотивация · Ответ кандидата №1" in text:
+                positions["label"] = baseline_y
+            if "quote" not in positions and "Это подробный кандидатский ответ." in text:
+                positions["quote"] = baseline_y
+
+        page.extract_text(visitor_text=capture)
+        if "label" in positions and "quote" in positions:
+            page_gap = positions["label"] - positions["quote"]
+            break
+
+    assert page_gap is not None, "The quote and its source label should be visible on the same page."
+    assert page_gap >= 25, f"Expected a clear gap above the quote block, got {page_gap:.1f} pt."
