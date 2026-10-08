@@ -115,3 +115,51 @@ def test_summary_keeps_each_observable_stage_as_a_separate_metric(event_name, me
 
     assert summary["metrics"][metric_name]["count"] == 1
     assert summary["metrics"][metric_name]["samples_ms"] == [17.0]
+
+
+def test_subscription_metrics_are_summarized_by_stage():
+    summary = _summarizer()([
+        json.dumps(_event("fast_model_ttft", duration=80, offset=1)),
+        json.dumps(_event("fast_model_completion", duration=900, offset=2)),
+        json.dumps(_event("background_evaluation", duration=1200, offset=3)),
+        json.dumps(_event("background_wait", duration=100, offset=4)),
+        json.dumps(_event("turn_ready", duration=1050, offset=5)),
+    ])
+
+    assert set(summary["metrics"]) == {
+        "fast_model_ttft_duration_ms", "fast_model_completion_duration_ms",
+        "background_evaluation_duration_ms", "background_wait_duration_ms",
+        "turn_ready_duration_ms",
+    }
+    assert all(metric["count"] == 1 for metric in summary["metrics"].values())
+    assert "transcript" not in json.dumps(summary).lower()
+
+
+def test_invalid_subscription_durations_are_reported():
+    summary = _summarizer()([
+        json.dumps(_event("fast_model_completion", duration=-1)),
+        json.dumps(_event("background_wait", duration=float("inf"))),
+        json.dumps(_event("turn_ready", duration=True)),
+    ])
+
+    assert summary["metrics"] == {}
+    assert len([warning for warning in summary["warnings"] if "invalid duration_ms" in warning]) == 3
+
+
+def test_client_gap_warning_never_claims_host_model_latency():
+    summary = _summarizer()([json.dumps(_event("client_gap", duration=22000))])
+
+    warning = " ".join(summary["warnings"]).lower()
+    assert "not model processing time" in warning
+    assert "host model latency" not in warning
+    assert "fast_model" not in warning
+
+
+def test_subscription_percentiles_are_marked_preliminary_below_twenty_samples():
+    events = [json.dumps(_event("fast_model_completion", duration=i)) for i in range(1, 10)]
+
+    metric = _summarizer()(events)["metrics"]["fast_model_completion_duration_ms"]
+
+    assert metric["p50"] == 5
+    assert metric["p95"] == 9
+    assert "preliminary" in metric["note"].lower()

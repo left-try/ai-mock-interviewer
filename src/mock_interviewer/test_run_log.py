@@ -84,6 +84,35 @@ class TestRunLog:
                 stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
                 stream.write("\n")
 
+    def append_timing_event(
+        self,
+        run_id: str,
+        event_name: str,
+        *,
+        session_id: str | None = None,
+        duration_ms: float,
+        model_role: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        """Write an allowlisted timing record; never accept arbitrary content fields."""
+        safe_details: dict[str, str | int] = {}
+        for key, value in (
+            ("model_role", model_role), ("model", model),
+            ("reasoning_effort", reasoning_effort),
+        ):
+            if value is not None and isinstance(value, str) and len(value) <= 100:
+                safe_details[key] = value
+        for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens)):
+            if value is not None and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                safe_details[key] = value
+        self.append_event(
+            run_id, event_name, session_id=session_id, duration_ms=duration_ms,
+            details=safe_details,
+        )
+
     def prune_expired_logs(self, now: datetime | None = None) -> list[Path]:
         if not self.root.exists():
             return []

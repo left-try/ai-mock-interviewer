@@ -108,3 +108,22 @@ def test_invalid_duration_and_unsafe_run_id_are_rejected(tmp_path):
         log.append_event("../outside", "run_started")
     with pytest.raises((ValueError, TypeError)):
         log.append_event("run-1", "answer_saved", duration_ms=-0.1)
+
+
+def test_timing_events_record_only_safe_metadata(tmp_path):
+    logger_module = _logger_module()
+    log = logger_module.TestRunLog(root=tmp_path)
+
+    log.append_timing_event(
+        "run-123", "fast_model_completion", duration_ms=120.5,
+        model_role="fast", model="gpt-example", reasoning_effort="low",
+        input_tokens=40, output_tokens=12,
+    )
+
+    event = json.loads(next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8"))
+    assert event["details"] == {
+        "model_role": "fast", "model": "gpt-example", "reasoning_effort": "low",
+        "input_tokens": 40, "output_tokens": 12,
+    }
+    assert not {"transcript", "prompt", "access_token"} & set(event)
+    assert not {"transcript", "prompt", "access_token"} & set(event["details"])

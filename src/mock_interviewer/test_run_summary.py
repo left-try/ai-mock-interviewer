@@ -16,6 +16,11 @@ _METRIC_NAMES = {
     "pdf_export": "pdf_export_duration_ms",
     "mcp_tool_call": "mcp_tool_call_duration_ms",
     "client_gap": "client_gap_ms",
+    "fast_model_ttft": "fast_model_ttft_duration_ms",
+    "fast_model_completion": "fast_model_completion_duration_ms",
+    "background_evaluation": "background_evaluation_duration_ms",
+    "background_wait": "background_wait_duration_ms",
+    "turn_ready": "turn_ready_duration_ms",
 }
 
 
@@ -68,7 +73,8 @@ def summarize_events(lines: Iterable[str]) -> dict:
         else:
             entry["p50"] = None
             entry["p95"] = None
-            entry["note"] = "preliminary: fewer than five samples"
+        if len(values) < 20:
+            entry["note"] = "preliminary: fewer than twenty samples"
         metrics[name] = entry
 
     if not samples:
