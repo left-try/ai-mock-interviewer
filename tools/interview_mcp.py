@@ -61,6 +61,7 @@ _test_last_call_end: dict[str, float] = {}
 _test_run_ended: set[str] = set()
 _test_logged_answers: dict[str, set[str]] = {}
 _plan_auth_instance = None
+_plan_clients = {}
 
 
 def _plan_auth():
@@ -69,6 +70,51 @@ def _plan_auth():
         from mock_interviewer.subscription_auth import ChatGPTPlanAuth
         _plan_auth_instance = ChatGPTPlanAuth()
     return _plan_auth_instance
+
+
+def _plan_client(*, model_role="fast", timing_recorder=None):
+    from mock_interviewer.subscription_inference import ChatGPTPlanClient
+    if timing_recorder is not None:
+        return ChatGPTPlanClient(auth=_plan_auth(), model_role=model_role, timing_recorder=timing_recorder)
+    if model_role not in _plan_clients:
+        _plan_clients[model_role] = ChatGPTPlanClient(auth=_plan_auth(), model_role=model_role)
+    return _plan_clients[model_role]
+
+
+@mcp.tool()
+async def list_chatgpt_plan_models() -> dict:
+    """List models available to the connected ChatGPT subscription account."""
+    try:
+        models = await _plan_client().list_models()
+        return {"ok": True, "models": [
+            {"slug": model.slug, "display_name": model.display_name,
+             "reasoning_efforts": list(model.reasoning_efforts) if model.reasoning_efforts is not None else None}
+            for model in models
+        ]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def configure_interview_models(
+    fast_model: str, fast_effort: str, analysis_model: str, analysis_effort: str,
+) -> dict:
+    """Choose the live interview model and the background analysis model."""
+    try:
+        client = _plan_client()
+        models = await client.list_models()
+        from mock_interviewer.model_settings import InterviewModelSettings
+        status = _plan_auth().status()
+        if not status.connected or not status.account_id:
+            raise ValueError("Connect a ChatGPT account before configuring interview models")
+        settings = InterviewModelSettings(fast_model, fast_effort, analysis_model, analysis_effort).validate(client)
+        settings.save(account_id=status.account_id)
+        return {"ok": True, "account_id": status.account_id,
+                "fast_model": settings.fast_model, "fast_effort": settings.fast_effort,
+                "analysis_model": settings.analysis_model, "analysis_effort": settings.analysis_effort,
+                "available_model_count": len(models)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @mcp.tool()
