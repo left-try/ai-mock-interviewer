@@ -22,6 +22,9 @@ test = [
 ]
 voice-probe = [
     "mcp>=2.0,<3",
+    "httpx>=0.27,<1",
+    "PyJWT[crypto]>=2.10,<3",
+    "keyring>=25,<27",
 ]
 
 [tool.setuptools]

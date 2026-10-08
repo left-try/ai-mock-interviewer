@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import time
+import webbrowser
 import uuid
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,54 @@ _test_runs: dict[str, tuple[str, TestRunLog]] = {}
 _test_last_call_end: dict[str, float] = {}
 _test_run_ended: set[str] = set()
 _test_logged_answers: dict[str, set[str]] = {}
+_plan_auth_instance = None
+
+
+def _plan_auth():
+    global _plan_auth_instance
+    if _plan_auth_instance is None:
+        from mock_interviewer.subscription_auth import ChatGPTPlanAuth
+        _plan_auth_instance = ChatGPTPlanAuth()
+    return _plan_auth_instance
+
+
+@mcp.tool()
+async def connect_chatgpt_plan() -> dict:
+    """Connect a ChatGPT account for plan-based inference using browser consent."""
+    auth = _plan_auth()
+    attempt = auth.begin_login()
+    try:
+        opened = await asyncio.to_thread(webbrowser.open, attempt.authorization_url, 1, True)
+        if not opened:
+            auth.cancel_login(attempt)
+            return {"ok": False, "error": "Could not open the system browser for ChatGPT sign-in"}
+        status = await auth.wait_for_callback(attempt)
+        return {"ok": True, "connected": status.connected, "account_id": status.account_id,
+                "email": status.email, "scopes": list(status.scopes)}
+    except Exception as exc:
+        auth.cancel_login(attempt)
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def chatgpt_plan_status() -> dict:
+    """Return the connected ChatGPT plan account status without secret values."""
+    try:
+        status = _plan_auth().status()
+        return {"ok": True, "connected": status.connected, "account_id": status.account_id,
+                "email": status.email, "scopes": list(status.scopes), "expires_at": status.expires_at}
+    except Exception:
+        return {"ok": False, "connected": False, "error": "The saved ChatGPT account status is unavailable"}
+
+
+@mcp.tool()
+async def disconnect_chatgpt_plan() -> dict:
+    """Remove saved ChatGPT plan credentials from the operating system credential store."""
+    try:
+        _plan_auth().disconnect()
+        return {"ok": True, "connected": False}
+    except Exception:
+        return {"ok": False, "error": "Could not remove the saved ChatGPT credentials"}
 
 
 def _decode(value: str, field: str) -> dict:
