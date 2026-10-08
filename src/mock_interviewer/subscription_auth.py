@@ -254,6 +254,8 @@ class ChatGPTPlanAuth:
             scopes = frozenset(str(tokens.get("scope", " ".join(record.get("scopes", [])))).split())
             if not REQUIRED_SCOPES.issubset(scopes):
                 raise SubscriptionAuthError("The refreshed ChatGPT grant no longer includes plan usage")
+            if not tokens.get("refresh_token"):
+                tokens["refresh_token"] = refresh
             replacement = dict(record, scopes=sorted(scopes), expires_at=time.time() + int(tokens.get("expires_in", 0)))
             next_version = self._store_tokens(account_id, tokens)
             replacement["token_version"] = next_version

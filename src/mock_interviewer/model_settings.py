@@ -9,6 +9,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+class ConfiguredModelRoute:
+    """Bind a catalog-validated model and effort to one inference role."""
+
+    def __init__(self, client, *, model: str, effort: str):
+        self.client = client
+        self.model = model
+        self.effort = effort
+
+    async def create_structured_response(self, *, input: list[dict], schema: dict, max_output_tokens: int):
+        return await self.client.create_structured_response(
+            model=self.model, effort=self.effort, input=input, schema=schema,
+            max_output_tokens=max_output_tokens,
+        )
+
+
 def default_model_settings_path() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if local:

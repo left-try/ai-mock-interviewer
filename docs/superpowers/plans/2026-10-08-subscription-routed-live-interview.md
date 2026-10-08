@@ -4,7 +4,7 @@
 
 **Goal:** Route adaptive interview turns through a fast model and per-answer report evaluation through a stronger model using the user’s ChatGPT subscription authorization, while preserving Codex Voice and raw transcript evidence.
 
-**Architecture:** The local MCP server obtains a user-approved ChatGPT plan OAuth token, discovers account-available models, and uses the Responses API for fast structured next-turn generation. Each exact answer is saved before inference; background evaluation tasks analyze that answer independently, and local code validates and aggregates evidence into the final report. Codex Voice remains the audio interface and reads the acknowledgment and question returned by MCP.
+**Architecture:** The local MCP server obtains a user-approved ChatGPT plan OAuth token, discovers account-available models, and uses the Responses API for fast structured next-turn generation. Each exact answer is saved before inference; background evaluation tasks analyze that answer independently, and local code validates and aggregates evidence into the final report. Codex Voice remains the audio interface and speaks one spontaneous, answer-specific reaction while MCP is working, then speaks the single returned question.
 
 **Tech Stack:** Python 3.11+, asyncio, MCP Python SDK, Pydantic v2, `httpx`, PyJWT with cryptography support, OS credential store via `keyring`, ChatGPT plan OAuth, Responses API, existing LangGraph service, pytest.
 
@@ -18,6 +18,7 @@
 - Validate model slugs and reasoning effort against the connected account’s available model catalog.
 - Preserve event idempotency and pending-answer retry behavior when model inference fails.
 - Run background report analysis independently of fast question generation; failed analysis may lower report confidence but cannot discard a candidate answer.
+- Keep the MCP answer tool to one fast model round trip; never return an acknowledgment for the host to say after waiting, since it would duplicate the host's in-flight reaction.
 - Preserve current interview topics, duplicate-question checks, evidence criteria, quote validation, and PDF layout.
 
 ## Review Focus
@@ -117,10 +118,10 @@
 
 **Interfaces:**
 - Add `InterviewContextState` with compact `candidate_facts`, `covered_topics`, and `open_threads`; retain exact `Turn.text` unchanged.
-- Add `FastTurnResult(acknowledgment: str, state: InterviewContextState, next_turn: NextTurn)`.
-- `InterviewService.start(..., fast_model=...)` obtains the first turn from the subscription model.
+- Add `FastTurnResult(state: InterviewContextState, next_turn: NextTurn)`.
+- `InterviewService.start(..., initial_question=...)` immediately installs the local opening question while subscription routes warm in the background.
 - `InterviewService.generate_next_turn(session_id, answer_event_id) -> FastTurnResult` operates on a previously persisted answer and keeps retries idempotent.
-- `record_candidate_answer` accepts only `session_id`, `event_id`, and exact `transcript`; return one `acknowledgment` and one `next_turn` or a retryable saved-answer state.
+- `record_candidate_answer` accepts only `session_id`, `event_id`, and exact `transcript`; return one `next_turn` or a retryable saved-answer state. The voice host supplies its spontaneous listening reaction while the tool runs.
 - `finish_interview` accepts only the session ID; report generation is handled by Task 5.
 
 - [ ] Add `test_start_uses_subscription_fast_model`, `test_fast_turn_uses_compact_state_without_rewriting_transcript`, and `test_fast_turn_returns_one_adaptive_question` in `tests/test_voice_interview_workflow.py`.
@@ -175,7 +176,7 @@
 - Test: `tests/test_voice_interview_workflow.py`
 
 **Interfaces:**
-- Startup returns auth status, available fast/analysis model roles, and the opening script; it does not perform model discovery during the live turn.
+- Auth status, available models, and fast/analysis settings are exposed as separate setup tools. Startup returns the opening script immediately while model discovery warms in the background.
 - The voice skill tells Codex to use a brief contextual acknowledgment, call MCP once per finalized transcript, then speak only the returned question once.
 - Test-run summary reports server model and export metrics while explicitly labeling client gap as combined speech, recognition, host, and client time.
 
@@ -199,3 +200,5 @@
 
 - Task 3: The initial interface proposed `max_output_tokens`, but the current ChatGPT plan preview explicitly rejects that field. Omit it on the wire; retain the code-level parameter only as a local contract until output limits are supported. Use strict schema validation for bounded structured output.
 - Task 3: The preview also rejects `role: system` in `input`; prompts must use `instructions` or developer messages.
+- Task 4: Use a deterministic local opening question so startup does not wait for the model. Do not return a backend acknowledgment; the voice host starts its content-specific reaction while the MCP answer call is pending, then speaks the single returned question.
+- Task 6: The automated suite is green (195 tests). The five matched real voice runs remain a manual release check because they require a connected subscription account and a human voice session; no latency improvement percentage is claimed before that measurement.

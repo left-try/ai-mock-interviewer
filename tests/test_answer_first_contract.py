@@ -5,11 +5,27 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mock_interviewer.errors import InvalidModelOutput, InvalidSessionTransition
 from tests.fakes import FakeModel, FakeResumeParser, next_question
+
+
+class FastTurnFake:
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+        self.before_call = None
+
+    async def create_structured_response(self, **kwargs):
+        self.calls += 1
+        if self.before_call:
+            await self.before_call()
+        if isinstance(self.value, Exception):
+            raise self.value
+        return SimpleNamespace(value=self.value, usage={})
 
 
 @pytest.mark.asyncio
@@ -197,3 +213,60 @@ def test_mcp_exposes_answer_only_and_next_turn_proposal_tools():
         "save_candidate_answer must persist before the host generates its next question"
     )
     assert callable(getattr(bridge, "propose_next_turn", None))
+
+
+@pytest.mark.asyncio
+async def test_answer_is_saved_before_fast_inference():
+    service_module = importlib.import_module("mock_interviewer.service")
+    service = service_module.InterviewService(
+        model=FakeModel([next_question("motivation", "Почему backend?")]), resume_parser=FakeResumeParser()
+    )
+    session = await service.start(resume_text="Existing opening")
+    fast = FastTurnFake({"kind": "question", "topic_id": "education", "text": "Что изучали?", "confidence": 0.8,
+                         "candidate_facts": [], "covered_topics": ["motivation"], "open_threads": []})
+
+    async def assert_answer_already_saved():
+        state = await service.get_session(session.id)
+        assert state.turns[-1].text == "Точный распознанный ответ"
+        assert state.pending_answer_event_id == "saved-first"
+    fast.before_call = assert_answer_already_saved
+    service.fast_model = fast
+
+    await service.persist_answer(session.id, "Точный распознанный ответ", event_id="saved-first")
+    await service.generate_next_turn(session.id, "saved-first")
+
+
+@pytest.mark.asyncio
+async def test_replayed_event_does_not_enqueue_duplicate_inference():
+    service_module = importlib.import_module("mock_interviewer.service")
+    service = service_module.InterviewService(
+        model=FakeModel([next_question("motivation", "Почему backend?")]), resume_parser=FakeResumeParser()
+    )
+    session = await service.start(resume_text="Existing opening")
+    fast = FastTurnFake({"kind": "question", "topic_id": "education", "text": "Что изучали?", "confidence": 0.8,
+                         "candidate_facts": [], "covered_topics": ["motivation"], "open_threads": []})
+    service.fast_model = fast
+    await service.persist_answer(session.id, "Ответ", event_id="idempotent-fast")
+
+    await service.generate_next_turn(session.id, "idempotent-fast")
+    await service.generate_next_turn(session.id, "idempotent-fast")
+
+    assert fast.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fast_inference_failure_keeps_answer_retryable():
+    service_module = importlib.import_module("mock_interviewer.service")
+    service = service_module.InterviewService(
+        model=FakeModel([next_question("motivation", "Почему backend?")]), resume_parser=FakeResumeParser()
+    )
+    session = await service.start(resume_text="Existing opening")
+    fast = FastTurnFake(RuntimeError("temporary failure"))
+    service.fast_model = fast
+    await service.persist_answer(session.id, "Надёжный сохранённый ответ", event_id="retry-fast")
+
+    with pytest.raises(service_module.ModelProviderError):
+        await service.generate_next_turn(session.id, "retry-fast")
+    stored = await service.get_session(session.id)
+    assert stored.turns[-1].text == "Надёжный сохранённый ответ"
+    assert stored.pending_answer_event_id == "retry-fast"

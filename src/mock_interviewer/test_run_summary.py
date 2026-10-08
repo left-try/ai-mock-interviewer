@@ -18,6 +18,7 @@ _METRIC_NAMES = {
     "client_gap": "client_gap_ms",
     "fast_model_ttft": "fast_model_ttft_duration_ms",
     "fast_model_completion": "fast_model_completion_duration_ms",
+    "model_setup": "model_setup_duration_ms",
     "background_evaluation": "background_evaluation_duration_ms",
     "background_wait": "background_wait_duration_ms",
     "turn_ready": "turn_ready_duration_ms",

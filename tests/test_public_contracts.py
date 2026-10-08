@@ -191,3 +191,31 @@ async def test_failed_model_call_does_not_leave_a_partially_active_session():
     with pytest.raises(app_module("errors").ModelProviderError):
         await service.start(resume_text="Учебный API")
     assert await service.list_sessions() == []
+
+
+def test_voice_tools_do_not_accept_host_generated_model_outputs():
+    import inspect
+    import sys
+    from pathlib import Path
+
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    bridge = importlib.import_module("interview_mcp")
+    assert set(inspect.signature(bridge.start_interview).parameters) == {"resume_text"}
+    assert set(inspect.signature(bridge.start_test_interview).parameters) == set()
+    assert set(inspect.signature(bridge.finish_interview).parameters) == {"session_id"}
+    assert set(inspect.signature(bridge.record_candidate_answer).parameters) == {
+        "session_id", "event_id", "transcript",
+    }
+
+
+def test_live_and_analysis_routes_are_distinct():
+    import sys
+    from pathlib import Path
+
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    bridge = importlib.import_module("interview_mcp")
+    assert bridge._plan_client(model_role="fast") is not bridge._plan_client(model_role="analysis")
