@@ -57,6 +57,52 @@ async def test_start_uses_subscription_fast_model():
 
 
 @pytest.mark.asyncio
+async def test_selected_level_changes_live_interviewer_expectations():
+    service_type = importlib.import_module("mock_interviewer.service").InterviewService
+    fast_model = FastTurnFake([{
+        "kind": "question", "topic_id": "project", "text": "Как вы принимали решения?", "confidence": 0.8,
+        "candidate_facts": [], "covered_topics": [], "open_threads": [],
+    }])
+    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model)
+
+    session = await service.start(resume_text="Опыт backend", level="middle")
+
+    assert session.level == "middle"
+    prompt = fast_model.calls[0]["input"][0]["content"]
+    assert "Middle" in prompt
+    assert "independent delivery" in prompt
+
+
+@pytest.mark.asyncio
+async def test_start_interview_uses_selected_screening_level_for_session_and_opening():
+    bridge, _ = _voice_modules()
+    async def configured_routes(*, timing_recorder=None):
+        return FastTurnFake([]), FastTurnFake([])
+    old_routes = bridge._configured_routes
+    bridge._configured_routes = configured_routes
+    try:
+        started = await bridge.start_interview(
+            resume_text="Работаю backend-разработчиком три года.", level="middle",
+        )
+        assert started["ok"] is True
+        assert started["level"] == "middle"
+        assert "Middle" in started["opening_script"]
+        assert "screening" in started["opening_script"].lower()
+        await bridge.delete_interview(started["session_id"])
+    finally:
+        bridge._configured_routes = old_routes
+
+
+@pytest.mark.asyncio
+async def test_start_interview_rejects_unknown_screening_level():
+    bridge, _ = _voice_modules()
+
+    started = await bridge.start_interview(resume_text="Опыт backend", level="senior")
+
+    assert started == {"ok": False, "error": "Unknown interview level: senior"}
+
+
+@pytest.mark.asyncio
 async def test_fast_turn_uses_compact_state_without_rewriting_transcript():
     service_type = importlib.import_module("mock_interviewer.service").InterviewService
     fast_model = FastTurnFake([
@@ -113,7 +159,7 @@ async def test_subscription_voice_tool_saves_answer_then_returns_one_question(tm
         fast_model.timing_recorder = timing_recorder
         return fast_model, fast_model
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     result = await bridge.record_candidate_answer(started["session_id"], "voice-event-1", "Мне интересен backend.")
 
     assert result["ok"] is True
@@ -140,7 +186,7 @@ async def test_interview_start_returns_while_subscription_routes_warm_in_backgro
         return FastTurnFake([]), FastTurnFake([])
 
     monkeypatch.setattr(bridge, "_configured_routes", slow_route_setup)
-    started = await asyncio.wait_for(bridge.start_test_interview(), timeout=0.1)
+    started = await asyncio.wait_for(bridge.start_test_interview(level="internship"), timeout=0.1)
 
     assert started["ok"] is True
     assert "продуктовая команда" in started["opening_script"].lower()
@@ -219,7 +265,7 @@ async def test_start_returns_local_company_intro_without_waiting_for_model(tmp_p
         await release.wait()
         return FastTurnFake([]), FastTurnFake([])
     monkeypatch.setattr(bridge, "_configured_routes", slow_routes)
-    result = await asyncio.wait_for(bridge.start_test_interview(), timeout=0.1)
+    result = await asyncio.wait_for(bridge.start_test_interview(level="internship"), timeout=0.1)
     assert result["ok"] is True
     assert "онлайн-магазина" in result["opening_script"].lower()
     assert result["turns"][-1]["text"] == bridge.INITIAL_INTERVIEW_QUESTION
@@ -238,7 +284,7 @@ async def test_mcp_answer_saves_transcript_then_returns_one_fast_question(tmp_pa
         fast.timing_recorder = timing_recorder
         return fast, analysis
     monkeypatch.setattr(bridge, "_configured_routes", routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     result = await bridge.record_candidate_answer(started["session_id"], "answer-1", "Я написал API.")
     assert result["ok"] is True
     assert result["candidate_turn"]["text"] == "Я написал API."
@@ -254,12 +300,12 @@ async def test_report_is_assembled_locally_and_exported_without_host_json(tmp_pa
     async def routes(*, timing_recorder=None):
         return FastTurnFake([]), FastTurnFake([])
     monkeypatch.setattr(bridge, "_configured_routes", routes)
-    started = await bridge.start_interview(resume_text="Учебный проект на FastAPI")
+    started = await bridge.start_interview(resume_text="Учебный проект на FastAPI", level="internship")
     result = await bridge.finish_interview(started["session_id"])
     assert result["ok"] is True
     assert result["interview_complete"] is True
     assert Path(result["report_files"]["pdf_path"]).exists()
-    assert "# Отчёт HR-интервью" in result["report_markdown"]
+    assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
     await bridge.delete_interview(started["session_id"])
 
 
@@ -277,7 +323,7 @@ async def test_report_export_remains_off_event_loop(tmp_path, monkeypatch):
         return FastTurnFake([]), FastTurnFake([])
     monkeypatch.setattr(bridge, "_configured_routes", routes)
     monkeypatch.setattr(bridge, "export_report_files", slow_export)
-    started = await bridge.start_interview(resume_text="Student backend project")
+    started = await bridge.start_interview(resume_text="Student backend project", level="internship")
     loop_thread = threading.get_ident()
     async def tick():
         await asyncio.sleep(0.005)
@@ -297,7 +343,7 @@ async def test_report_export_failure_keeps_visible_markdown(monkeypatch):
         return FastTurnFake([]), FastTurnFake([])
     monkeypatch.setattr(bridge, "_configured_routes", routes)
     monkeypatch.setattr(bridge, "export_report_files", fail_export)
-    started = await bridge.start_interview(resume_text="Student backend project")
+    started = await bridge.start_interview(resume_text="Student backend project", level="internship")
     result = await bridge.finish_interview(started["session_id"])
     assert result["ok"] is True
     assert result["report_files"] is None

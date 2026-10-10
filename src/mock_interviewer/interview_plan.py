@@ -1,4 +1,4 @@
-"""Default Backend Internship HR interview coverage and progression rules."""
+"""Shared Backend Screening coverage and progression rules."""
 
 from __future__ import annotations
 

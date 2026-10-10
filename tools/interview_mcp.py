@@ -9,7 +9,7 @@ import time
 import webbrowser
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from voice_probe import mcp
 
@@ -22,7 +22,8 @@ from mock_interviewer.report_export import (
     render_report_markdown,
 )
 from mock_interviewer.service import InterviewService
-from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILE
+from mock_interviewer.scenarios import level_label, normalize_level
+from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILES
 from mock_interviewer.test_run_log import TestRunLog, default_test_runs_dir
 from mock_interviewer.test_run_summary import summarize_events
 
@@ -64,7 +65,7 @@ _plan_auth_instance = None
 _plan_clients = {}
 _route_tasks: dict[str, asyncio.Task] = {}
 
-INITIAL_INTERVIEW_QUESTION = "Почему вас заинтересовала backend-разработка и чего вы хотите добиться во время стажировки?"
+INITIAL_INTERVIEW_QUESTION = "Расскажите о backend-проекте или задаче, которые лучше всего показывают ваш уровень и вклад."
 
 
 def _plan_auth():
@@ -231,6 +232,7 @@ def _public_session(session, *, include_transcript=True):
         "session_id": session.id,
         "status": session.status,
         "test_mode": session.test_mode,
+        "level": session.level,
         "interview_progress": interview_progress(session.turns),
         "report": None if session.report is None else {
             "recommendation": session.report.recommendation,
@@ -247,12 +249,14 @@ def _public_session(session, *, include_transcript=True):
     return result
 
 
-def _opening_script(question: str, *, test_mode: bool) -> str:
+def _opening_script(question: str, *, test_mode: bool, level: str = "internship") -> str:
+    level = normalize_level(level)
+    level_name = level_label(level)
     disclosure = (
-        "Это синтетическое собеседование на стажировку backend-разработчика; распознанные ответы "
+        f"Это синтетическое собеседование Backend Screening уровня {level_name}; распознанные ответы "
         "сохраняются в локальном диагностическом журнале. "
         if test_mode
-        else "Это тренировочное интервью на стажировку backend-разработчика. "
+        else f"Это тренировочное интервью Backend Screening уровня {level_name}. "
     )
     return (
         f"Здравствуйте! {disclosure}Представим, что мы — продуктовая команда онлайн-магазина и развиваем "
@@ -318,19 +322,22 @@ def _fail_test_call(session_id: str, started_at: float, stage: str, exc: Excepti
 
 
 @mcp.tool()
-async def start_interview(resume_text: str) -> dict:
-    """Start Backend Internship HR practice; save each answer before proposing its next question."""
+async def start_interview(resume_text: str, level: Literal["internship", "junior", "middle"]) -> dict:
+    """Start Backend Screening at the selected internship, junior, or middle level."""
     try:
+        level = normalize_level(level)
         model = HostProposalModel()
         service = InterviewService(model=model)
-        session = await service.start(resume_text=resume_text, initial_question=INITIAL_INTERVIEW_QUESTION)
+        session = await service.start(
+            resume_text=resume_text, initial_question=INITIAL_INTERVIEW_QUESTION, level=level,
+        )
         with _sessions_lock:
             _sessions[session.id] = (service, model)
         _route_tasks[session.id] = asyncio.create_task(_configured_routes())
         return {
             "ok": True,
             **_public_session(session),
-            "opening_script": _opening_script(session.turns[-1].text, test_mode=False),
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=False, level=level),
             "next_action": "ask_next_question",
             "instruction": (
                 "Speak opening_script as one opening; the first question is already included, so do not "
@@ -355,10 +362,11 @@ async def start_interview(resume_text: str) -> dict:
 
 
 @mcp.tool()
-async def start_test_interview() -> dict:
-    """Start a resume-free synthetic interview and disclose local answer logging."""
+async def start_test_interview(level: Literal["internship", "junior", "middle"]) -> dict:
+    """Start a resume-free synthetic Backend Screening at the selected level."""
     started_at = time.perf_counter()
     try:
+        level = normalize_level(level)
         run_id = str(uuid.uuid4())
         logger = TestRunLog(root=TEST_RUNS_DIR)
         logger.append_event(run_id, "run_started", details={"test_mode": True})
@@ -366,7 +374,8 @@ async def start_test_interview() -> dict:
         model = HostProposalModel()
         service = InterviewService(model=model)
         session = await service.start(
-            resume_text=SYNTHETIC_BACKEND_PROFILE, test_mode=True, initial_question=INITIAL_INTERVIEW_QUESTION,
+            resume_text=SYNTHETIC_BACKEND_PROFILES[level], test_mode=True,
+            initial_question=INITIAL_INTERVIEW_QUESTION, level=level,
         )
         with _sessions_lock:
             _sessions[session.id] = (service, model)
@@ -392,7 +401,7 @@ async def start_test_interview() -> dict:
             "ok": True,
             **_public_session(session),
             "test_mode": True,
-            "opening_script": _opening_script(session.turns[-1].text, test_mode=True),
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=True, level=level),
             "run_id": run_id,
             "log_path": str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve()),
             "next_action": "ask_next_question",
@@ -849,7 +858,7 @@ async def finish_interview(session_id: str) -> dict:
             _append_test_event(session_id, "background_wait", duration_ms=validation_duration)
             _append_test_event(session_id, "report_validation", duration_ms=0)
         markdown_started = time.perf_counter()
-        report_markdown = render_report_markdown(session.report, session.turns)
+        report_markdown = render_report_markdown(session.report, session.turns, level=session.level)
         markdown_duration = (time.perf_counter() - markdown_started) * 1000
         if test_run:
             _append_test_event(session_id, "markdown_render", duration_ms=markdown_duration)
@@ -862,6 +871,7 @@ async def finish_interview(session_id: str) -> dict:
                 session.id,
                 output_dir=REPORTS_DIR,
                 markdown=report_markdown,
+                level=session.level,
             )
             report_files = {"markdown_path": files["markdown_path"], "pdf_path": files["pdf_path"]}
             export_error = None

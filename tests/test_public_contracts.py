@@ -202,8 +202,8 @@ def test_voice_tools_do_not_accept_host_generated_model_outputs():
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
     bridge = importlib.import_module("interview_mcp")
-    assert set(inspect.signature(bridge.start_interview).parameters) == {"resume_text"}
-    assert set(inspect.signature(bridge.start_test_interview).parameters) == set()
+    assert set(inspect.signature(bridge.start_interview).parameters) == {"resume_text", "level"}
+    assert set(inspect.signature(bridge.start_test_interview).parameters) == {"level"}
     assert set(inspect.signature(bridge.finish_interview).parameters) == {"session_id"}
     assert set(inspect.signature(bridge.record_candidate_answer).parameters) == {
         "session_id", "event_id", "transcript",

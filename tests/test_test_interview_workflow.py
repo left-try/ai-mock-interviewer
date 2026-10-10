@@ -79,9 +79,10 @@ async def test_fast_turn_cannot_repeat_previous_question():
 
 
 def test_test_interview_opening_keeps_synthetic_disclosure():
-    opening = _bridge()._opening_script("Почему backend?", test_mode=True)
+    opening = _bridge()._opening_script("Почему backend?", test_mode=True, level="junior")
 
     assert "синтетическое собеседование" in opening.lower()
+    assert "Junior" in opening
     assert "локальном диагностическом журнале" in opening.lower()
     assert "Почему backend?" in opening
 
@@ -96,10 +97,15 @@ async def test_test_start_marks_run_and_discloses_local_answer_logging_before_qu
     async def routes(*, timing_recorder=None):
         return FastModel({}), FastModel({})
     monkeypatch.setattr(bridge, "_configured_routes", routes)
-    result = await start()
+    result = await start(level="middle")
 
     assert result["ok"] is True
     assert result["test_mode"] is True
+    assert result["level"] == "middle"
+    assert "Middle" in result["opening_script"]
+    service, _ = bridge._sessions[result["session_id"]]
+    session = await service.get_session(result["session_id"])
+    assert "четырьмя годами коммерческого опыта" in session.resume_text
     assert result["run_id"]
     assert result["turns"][0]["role"] == "interviewer"
     assert "локальн" in result["opening_script"].lower()
@@ -129,7 +135,7 @@ async def test_test_start_does_not_call_resume_parser(tmp_path, monkeypatch):
     async def routes(*, timing_recorder=None):
         return FastModel({}), FastModel({})
     monkeypatch.setattr(bridge, "_configured_routes", routes)
-    result = await start()
+    result = await start(level="internship")
 
     assert result["ok"] is True
     assert parser_calls == []
@@ -150,7 +156,7 @@ async def test_test_start_and_answer_use_server_owned_question_route(tmp_path, m
         })
 
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     assert started["ok"] and started["test_mode"] is True
     assert "синтетическое собеседование" in started["opening_script"].lower()
     assert started["turns"][-1]["text"] == bridge.INITIAL_INTERVIEW_QUESTION
@@ -179,7 +185,7 @@ async def test_test_run_report_is_assembled_locally_and_logged(tmp_path, monkeyp
         })
 
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     saved = await bridge.record_candidate_answer(started["session_id"], "answer-1", "Я сделал API.")
     assert saved["ok"] is True
 
@@ -204,7 +210,7 @@ async def test_duplicate_answer_event_is_saved_and_logged_once(tmp_path, monkeyp
         }), FastModel({"scores": {}, "evidence": [], "strengths": [], "growth_areas": [], "uncertainties": []})
 
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     args = (started["session_id"], "same-event", "Написал API магазина.")
     first = await bridge.record_candidate_answer(*args)
     replay = await bridge.record_candidate_answer(*args)
@@ -229,7 +235,7 @@ async def test_test_log_write_failure_does_not_discard_saved_answer(tmp_path, mo
         }), FastModel({"scores": {}, "evidence": [], "strengths": [], "growth_areas": [], "uncertainties": []})
 
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview()
+    started = await bridge.start_test_interview(level="internship")
     _, logger = bridge._test_runs[started["session_id"]]
 
     def fail_log(*_args, **_kwargs):
@@ -255,7 +261,7 @@ async def test_concurrent_test_runs_keep_logs_separate(tmp_path, monkeypatch):
         }), FastModel({"scores": {}, "evidence": [], "strengths": [], "growth_areas": [], "uncertainties": []})
 
     monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    first, second = await bridge.start_test_interview(), await bridge.start_test_interview()
+    first, second = await bridge.start_test_interview(level="internship"), await bridge.start_test_interview(level="internship")
     assert first["run_id"] != second["run_id"]
     await bridge.record_candidate_answer(first["session_id"], "a1", "Ответ один")
     await bridge.record_candidate_answer(second["session_id"], "a2", "Ответ два")

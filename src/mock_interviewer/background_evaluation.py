@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .domain.models import InterviewContextState, Turn
+from .scenarios import level_expectations, level_label
 
 ALLOWED_CRITERIA = frozenset({
     "self_presentation", "motivation", "personal_contribution", "communication",
@@ -51,12 +52,12 @@ class BackgroundEvaluationQueue:
         self._failures: dict[str, set[str]] = {}
 
     def enqueue(self, session_id: str, candidate_turn: Turn, context: InterviewContextState,
-                *, question: str = "", rubric: dict | None = None) -> None:
+                *, question: str = "", rubric: dict | None = None, level: str = "internship") -> None:
         session_tasks = self._tasks.setdefault(session_id, {})
         if candidate_turn.id in session_tasks or candidate_turn.id in self._results.get(session_id, {}):
             return
         task = asyncio.create_task(self._evaluate_and_store(
-            session_id, candidate_turn, context, question=question, rubric=rubric or {},
+            session_id, candidate_turn, context, question=question, rubric=rubric or {}, level=level,
         ))
         session_tasks[candidate_turn.id] = task
 
@@ -88,11 +89,11 @@ class BackgroundEvaluationQueue:
     def pending_count(self, session_id: str) -> int:
         return sum(not task.done() for task in self._tasks.get(session_id, {}).values())
 
-    async def _evaluate_and_store(self, session_id, turn, context, *, question, rubric):
+    async def _evaluate_and_store(self, session_id, turn, context, *, question, rubric, level):
         async with self._semaphore:
             try:
                 result = await self.model.create_structured_response(
-                    input=_messages(turn, context, question=question, rubric=rubric),
+                    input=_messages(turn, context, question=question, rubric=rubric, level=level),
                     schema=EVALUATION_SCHEMA,
                     max_output_tokens=1200,
                 )
@@ -142,9 +143,10 @@ def _validate_evaluation(value, turn: Turn) -> AnswerEvaluation:
     )
 
 
-def _messages(turn, context, *, question, rubric):
+def _messages(turn, context, *, question, rubric, level="internship"):
     instructions = (
-        "Evaluate only this one candidate answer for training feedback. Do not invent evidence or quote from "
+        f"Evaluate only this one candidate answer for {level_label(level)} Backend Engineering screening feedback. "
+        f"{level_expectations(level)} Do not invent evidence or quote from "
         "context. Scores are integers 1..5 or null and use only allowed report criteria. Any evidence quote "
         "must be an exact substring of the candidate_answer_exact and source_turn_id must match its turn id. "
         "Return scores, evidence, strengths, growth_areas, uncertainties."
