@@ -7,12 +7,12 @@ import copy
 import io
 import uuid
 import zipfile
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
 from .domain import rules
-from .domain.models import FastTurnResult, InterviewContextState, InterviewReport, InterviewSession, NextTurn, Turn
+from .domain.models import InterviewReport, InterviewSession, NextTurn, Turn
 from .errors import (
     ConcurrentSessionUpdate,
     InvalidModelOutput,
@@ -24,7 +24,7 @@ from .errors import (
     SessionNotFound,
 )
 from .graph import build_graph
-from .prompts import fast_turn_messages, interview_messages, report_messages
+from .prompts import interview_messages, report_messages
 from .resume import ResumeParser
 from .scenarios import normalize_level
 
@@ -47,23 +47,6 @@ class ReportSchema(BaseModel):
     disclaimer: str
 
 
-class FastTurnSchema(BaseModel):
-    model_config = {"extra": "forbid"}
-    kind: Literal["question", "follow_up", "repeat"]
-    topic_id: Literal[
-        "motivation", "education", "project", "personal_contribution", "teamwork",
-        "challenge", "reflection", "expectations",
-    ]
-    text: str = Field(min_length=1, max_length=1000)
-    confidence: float = Field(ge=0.0, le=1.0)
-    candidate_facts: list[str] = Field(max_length=8)
-    covered_topics: list[Literal[
-        "motivation", "education", "project", "personal_contribution", "teamwork",
-        "challenge", "reflection", "expectations",
-    ]] = Field(max_length=8)
-    open_threads: list[str] = Field(max_length=8)
-
-
 class InterviewService:
     MAX_RESUME_BYTES = 2 * 1024 * 1024
     MAX_RESUME_CHARS = 20_000
@@ -83,11 +66,8 @@ class InterviewService:
     }
     DISCLAIMER = "Учебная обратная связь для практики; это не решение о найме."
 
-    def __init__(self, *, model, resume_parser=None, limits=None, rubric=None, fast_model=None,
-                 background_evaluation_queue=None):
+    def __init__(self, *, model, resume_parser=None, limits=None, rubric=None):
         self.model = model
-        self.fast_model = fast_model
-        self.background_evaluation_queue = background_evaluation_queue
         self.resume_parser = resume_parser or ResumeParser()
         self.limits = {"max_turns": self.MAX_TURNS, **(limits or {})}
         self.rubric = copy.deepcopy(rubric or {})
@@ -106,8 +86,8 @@ class InterviewService:
         except Exception as exc:
             raise ModelProviderError() from exc
 
-    async def start(self, *, resume_text: str, test_mode: bool = False, fast_model=None,
-                    initial_question: str | None = None, level: str = "internship") -> InterviewSession:
+    async def start(self, *, resume_text: str, test_mode: bool = False,
+                    level: str = "internship") -> InterviewSession:
         level = normalize_level(level)
         text = self._validate_resume_text(resume_text)
         session = InterviewSession(
@@ -118,117 +98,16 @@ class InterviewService:
             level=level,
         )
         try:
-            route = fast_model or self.fast_model
-            if initial_question is not None:
-                next_turn = self._validate_next_turn({
-                    "kind": "question", "topic_id": "motivation", "text": initial_question,
-                    "evidence": [], "confidence": 1.0,
-                })
-            elif route is not None:
-                self.fast_model = route
-                value = await self._invoke_fast(
-                    route, fast_turn_messages("", "", session.context_state, test_mode=test_mode, level=level)
-                )
-                next_turn, session.context_state = self._validate_fast_turn(value)
-            else:
-                value = await self._invoke(
-                    interview_messages(text, [], rubric=self.rubric, level=level), NextTurnSchema
-                )
-                next_turn = self._validate_next_turn(value)
+            value = await self._invoke(
+                interview_messages(text, [], rubric=self.rubric, level=level), NextTurnSchema
+            )
+            next_turn = self._validate_next_turn(value)
         except (InvalidModelOutput, ModelProviderError):
             raise
         session.turns.append(self._interviewer_turn(next_turn, len(session.turns) + 1))
         self._sessions[session.id] = session
         self._locks[session.id] = asyncio.Lock()
         return self._copy(session)
-
-    async def generate_next_turn(self, session_id: str, answer_event_id: str) -> FastTurnResult:
-        """Generate one subscription-routed question after an answer is durable."""
-        session = self._require(session_id)
-        lock = self._locks[session_id]
-        if lock.locked():
-            raise ConcurrentSessionUpdate("Another update is already being processed for this interview.")
-        async with lock:
-            session = self._require(session_id)
-            if answer_event_id in session.fast_turn_results:
-                snapshot = self._copy(session)
-                result = session.fast_turn_results[answer_event_id]
-                next_turn = NextTurn(**result["next_turn"])
-                state = InterviewContextState(**result["state"])
-                return FastTurnResult(state, next_turn, snapshot)
-            if session.pending_answer_event_id != answer_event_id:
-                raise InvalidSessionTransition("No saved answer is waiting for a live question.")
-            if session.status != "active":
-                raise InvalidSessionTransition("This interview cannot accept a live question now.")
-            route = self.fast_model
-            if route is None:
-                raise ModelProviderError()
-            candidate = session.turns[-1]
-            previous_question = next(
-                (turn.text for turn in reversed(session.turns[:-1]) if turn.role == "interviewer"), ""
-            )
-            messages = fast_turn_messages(candidate.text, previous_question, session.context_state,
-                                          test_mode=session.test_mode, level=session.level)
-            try:
-                value = await self._invoke_fast(route, messages)
-                next_turn, updated_state = self._validate_fast_turn(value)
-                history = [turn.text for turn in session.turns if turn.role == "interviewer"]
-                if rules.is_duplicate_question(next_turn.text, history):
-                    raise InvalidModelOutput("The fast model repeated an earlier interviewer question.")
-                if next_turn.kind == "follow_up":
-                    count = session.follow_ups.get(next_turn.topic_id, 0)
-                    if count >= self.MAX_FOLLOW_UPS_PER_TOPIC:
-                        raise InvalidModelOutput("The follow-up limit for this topic has been reached.")
-                    session.follow_ups[next_turn.topic_id] = count + 1
-            except (InvalidModelOutput, InvalidReport, ModelProviderError):
-                raise
-            except Exception as exc:
-                raise ModelProviderError() from exc
-            session.context_state = updated_state
-            session.turns.append(self._interviewer_turn(next_turn, len(session.turns) + 1))
-            session.pending_answer_event_id = None
-            session.fast_turn_results[answer_event_id] = {
-                "next_turn": {
-                    "kind": next_turn.kind, "topic_id": next_turn.topic_id, "text": next_turn.text,
-                    "evidence": copy.deepcopy(next_turn.evidence), "confidence": next_turn.confidence,
-                },
-                "state": {
-                    "candidate_facts": list(updated_state.candidate_facts),
-                    "covered_topics": list(updated_state.covered_topics),
-                    "open_threads": list(updated_state.open_threads),
-                },
-            }
-            session.version += 1
-            session.event_results[answer_event_id] = self._copy(session)
-            snapshot = self._copy(session)
-            return FastTurnResult(copy.deepcopy(updated_state), next_turn, snapshot)
-
-    async def _invoke_fast(self, model, messages):
-        try:
-            result = await model.create_structured_response(
-                input=messages, schema=FastTurnSchema.model_json_schema(), max_output_tokens=512,
-            )
-            return result.value if hasattr(result, "value") else result
-        except (InvalidModelOutput, InvalidReport, ModelProviderError):
-            raise
-        except Exception as exc:
-            raise ModelProviderError() from exc
-
-    def _validate_fast_turn(self, value):
-        data = self._mapping(value)
-        try:
-            parsed = FastTurnSchema.model_validate(data)
-        except Exception as exc:
-            raise InvalidModelOutput("The fast model returned an invalid interviewer turn or context.") from exc
-        next_turn = self._validate_next_turn(data)
-        state = InterviewContextState(
-            candidate_facts=[fact.strip() for fact in parsed.candidate_facts if fact.strip()],
-            covered_topics=list(dict.fromkeys(parsed.covered_topics)),
-            open_threads=[thread.strip() for thread in parsed.open_threads if thread.strip()],
-        )
-        if any(len(value) > 240 for value in (*state.candidate_facts, *state.open_threads)):
-            raise InvalidModelOutput("The fast model returned oversized interview context.")
-        return next_turn, state
 
     async def start_from_upload(self, content: bytes, *, filename: str) -> InterviewSession:
         self._validate_upload(content, filename)
@@ -342,7 +221,6 @@ class InterviewService:
         *,
         event_id: str,
         allow_final_correction: bool = False,
-        finish_after_answer: bool = False,
     ) -> InterviewSession:
         """Persist a finalized answer without waiting for the next question proposal."""
         session = self._require(session_id)
@@ -375,20 +253,9 @@ class InterviewService:
                 raise InvalidSessionTransition("The previous saved answer needs a question proposal or early finish.")
 
             session.event_payloads[event_id] = clean
-            candidate = Turn(id=self._turn_id(session), role="candidate", text=clean)
-            previous_question = next(
-                (turn.text for turn in reversed(session.turns) if turn.role == "interviewer"), ""
-            )
-            session.turns.append(candidate)
-            if finish_after_answer and not final_correction:
-                session.status = "awaiting_report"
-            elif not final_correction:
+            session.turns.append(Turn(id=self._turn_id(session), role="candidate", text=clean))
+            if not final_correction:
                 session.pending_answer_event_id = event_id
-            if not final_correction and self.background_evaluation_queue is not None:
-                self.background_evaluation_queue.enqueue(
-                    session_id, copy.deepcopy(candidate), copy.deepcopy(session.context_state),
-                    question=previous_question, rubric=self.rubric, level=session.level,
-                )
             session.version += 1
             session.event_results[event_id] = self._copy(session)
             return self._copy(session)
@@ -445,26 +312,17 @@ class InterviewService:
                 raise InvalidSessionTransition("This interview cannot be completed from its current state.")
             session.status = "awaiting_report"
             try:
-                if self.background_evaluation_queue is not None:
-                    from .report_aggregation import aggregate_report
-                    evaluations = await self.background_evaluation_queue.finish_session(session_id)
-                    aggregate = aggregate_report(
-                        evaluations, session.turns,
-                        failures=self.background_evaluation_queue.failures_for(session_id),
-                    )
-                    report = self._validate_report(aggregate.__dict__, session)
-                else:
-                    value = await self._invoke(
-                        report_messages(
-                            session.resume_text,
-                            session.turns,
-                            rubric=self.rubric,
-                            test_mode=session.test_mode,
-                            level=session.level,
-                        ),
-                        ReportSchema,
-                    )
-                    report = self._validate_report(value, session)
+                value = await self._invoke(
+                    report_messages(
+                        session.resume_text,
+                        session.turns,
+                        rubric=self.rubric,
+                        test_mode=session.test_mode,
+                        level=session.level,
+                    ),
+                    ReportSchema,
+                )
+                report = self._validate_report(value, session)
             except (InvalidReport, ModelProviderError):
                 raise
             session.report = report
@@ -486,14 +344,10 @@ class InterviewService:
                 raise InvalidSessionTransition("This interview cannot be cancelled from its current state.")
             session.status = "cancelled"
             session.version += 1
-            if self.background_evaluation_queue is not None:
-                await self.background_evaluation_queue.cancel_session(session_id)
             return self._copy(session)
 
     async def delete(self, session_id: str) -> None:
         self._require(session_id)
-        if self.background_evaluation_queue is not None:
-            await self.background_evaluation_queue.cancel_session(session_id)
         self._sessions.pop(session_id, None)
         self._locks.pop(session_id, None)
 

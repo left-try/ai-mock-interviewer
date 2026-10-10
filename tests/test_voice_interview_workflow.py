@@ -9,29 +9,10 @@ import sys
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from tests.fakes import FakeModel, FakeResumeParser, next_question
-from mock_interviewer.background_evaluation import BackgroundEvaluationQueue
-
-
-class FastTurnFake:
-    def __init__(self, values):
-        self.values = list(values)
-        self.calls = []
-        self.timing_recorder = None
-
-    async def create_structured_response(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.timing_recorder:
-            self.timing_recorder("fast_model_ttft", duration_ms=3.0, model_role="fast", model="fake", reasoning_effort="low")
-            self.timing_recorder("fast_model_completion", duration_ms=8.0, model_role="fast", model="fake", reasoning_effort="low")
-        value = self.values.pop(0)
-        if isinstance(value, Exception):
-            raise value
-        return SimpleNamespace(value=value, usage={})
 
 
 def _voice_modules():
@@ -41,317 +22,173 @@ def _voice_modules():
     return importlib.import_module("interview_mcp"), importlib.import_module("voice_probe")
 
 
-@pytest.mark.asyncio
-async def test_start_uses_subscription_fast_model():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-    fast_model = FastTurnFake([{
-        "kind": "question", "topic_id": "motivation", "text": "Почему backend?", "confidence": 0.8,
-        "candidate_facts": [], "covered_topics": [], "open_threads": [],
-    }])
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model)
+def test_voice_mcp_server_explains_per_answer_logging_and_automatic_finish():
+    _, voice_probe = _voice_modules()
 
-    session = await service.start(resume_text="Я изучаю Python.")
+    instructions = voice_probe.mcp.instructions
 
-    assert session.turns[-1].text == "Почему backend?"
-    assert len(fast_model.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_selected_level_changes_live_interviewer_expectations():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-    fast_model = FastTurnFake([{
-        "kind": "question", "topic_id": "project", "text": "Как вы принимали решения?", "confidence": 0.8,
-        "candidate_facts": [], "covered_topics": [], "open_threads": [],
-    }])
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model)
-
-    session = await service.start(resume_text="Опыт backend", level="middle")
-
-    assert session.level == "middle"
-    prompt = fast_model.calls[0]["input"][0]["content"]
-    assert "Middle" in prompt
-    assert "independent delivery" in prompt
-
-
-@pytest.mark.asyncio
-async def test_start_interview_uses_selected_screening_level_for_session_and_opening():
-    bridge, _ = _voice_modules()
-    async def configured_routes(*, timing_recorder=None):
-        return FastTurnFake([]), FastTurnFake([])
-    old_routes = bridge._configured_routes
-    bridge._configured_routes = configured_routes
-    try:
-        started = await bridge.start_interview(
-            resume_text="Работаю backend-разработчиком три года.", level="middle",
-        )
-        assert started["ok"] is True
-        assert started["level"] == "middle"
-        assert "Middle" in started["opening_script"]
-        assert "screening" in started["opening_script"].lower()
-        await bridge.delete_interview(started["session_id"])
-    finally:
-        bridge._configured_routes = old_routes
-
-
-@pytest.mark.asyncio
-async def test_start_interview_rejects_unknown_screening_level():
-    bridge, _ = _voice_modules()
-
-    started = await bridge.start_interview(resume_text="Опыт backend", level="senior")
-
-    assert started == {"ok": False, "error": "Unknown interview level: senior"}
-
-
-@pytest.mark.asyncio
-async def test_fast_turn_uses_compact_state_without_rewriting_transcript():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-    fast_model = FastTurnFake([
-        {"kind": "question", "topic_id": "motivation", "text": "Почему backend?", "confidence": 0.8,
-         "candidate_facts": [], "covered_topics": [], "open_threads": []},
-        {"kind": "question", "topic_id": "project", "text": "Что вы реализовали лично?", "confidence": 0.7,
-         "candidate_facts": ["Изучает FastAPI"], "covered_topics": ["motivation"], "open_threads": ["Опыт проекта"]},
-    ])
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model)
-    session = await service.start(resume_text="Backend практика")
-    exact_answer = "Ну, эээ, я делал API для магазина."
-    await service.persist_answer(session.id, exact_answer, event_id="answer-compact")
-    updated = await service.generate_next_turn(session.id, "answer-compact")
-
-    assert updated.session.turns[-2].text == exact_answer
-    assert updated.session.turns[-1].text == "Что вы реализовали лично?"
-    assert updated.state.candidate_facts == ["Изучает FastAPI"]
-    payload = json.dumps(fast_model.calls[-1]["input"], ensure_ascii=False)
-    assert exact_answer in payload
-    assert "полная история" not in payload.lower()
-
-
-@pytest.mark.asyncio
-async def test_fast_turn_returns_one_adaptive_question():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-    fast_model = FastTurnFake([
-        {"kind": "question", "topic_id": "motivation", "text": "Почему backend?", "confidence": 0.8,
-         "candidate_facts": [], "covered_topics": [], "open_threads": []},
-        {"kind": "follow_up", "topic_id": "project", "text": "Как вы проверили это изменение?", "confidence": 0.8,
-         "candidate_facts": ["Проверял по логам"], "covered_topics": ["project"], "open_threads": []},
-    ])
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model)
-    session = await service.start(resume_text="Backend практика")
-    await service.persist_answer(session.id, "Проверил по логам", event_id="answer-followup")
-
-    result = await service.generate_next_turn(session.id, "answer-followup")
-
-    assert result.next_turn.text == "Как вы проверили это изменение?"
-    assert [turn.text for turn in result.session.turns if turn.role == "interviewer"] == [
-        "Почему backend?", "Как вы проверили это изменение?",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_subscription_voice_tool_saves_answer_then_returns_one_question(tmp_path, monkeypatch):
-    bridge, _ = _voice_modules()
-    monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
-    fast_model = FastTurnFake([
-        {"kind": "question", "topic_id": "project", "text": "Что вы сделали в проекте?", "confidence": 0.8,
-         "candidate_facts": ["интересуется backend"], "covered_topics": ["motivation"], "open_threads": []},
-    ])
-
-    async def configured_routes(*, timing_recorder=None):
-        fast_model.timing_recorder = timing_recorder
-        return fast_model, fast_model
-    monkeypatch.setattr(bridge, "_configured_routes", configured_routes)
-    started = await bridge.start_test_interview(level="internship")
-    result = await bridge.record_candidate_answer(started["session_id"], "voice-event-1", "Мне интересен backend.")
-
-    assert result["ok"] is True
-    assert result["candidate_turn"]["text"] == "Мне интересен backend."
-    assert result["next_turn"]["text"] == "Что вы сделали в проекте?"
-    assert set(__import__("inspect").signature(bridge.record_candidate_answer).parameters) == {
-        "session_id", "event_id", "transcript",
-    }
-    assert "acknowledgment" not in result
-    events = [json.loads(row) for row in Path(started["log_path"]).read_text(encoding="utf-8").splitlines()]
-    assert "fast_model_ttft" in [event["event_name"] for event in events]
-    assert "turn_ready" in [event["event_name"] for event in events]
-    await bridge.delete_interview(started["session_id"])
-
-
-@pytest.mark.asyncio
-async def test_interview_start_returns_while_subscription_routes_warm_in_background(tmp_path, monkeypatch):
-    bridge, _ = _voice_modules()
-    monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
-    release_routes = asyncio.Event()
-
-    async def slow_route_setup(*, timing_recorder=None):
-        await release_routes.wait()
-        return FastTurnFake([]), FastTurnFake([])
-
-    monkeypatch.setattr(bridge, "_configured_routes", slow_route_setup)
-    started = await asyncio.wait_for(bridge.start_test_interview(level="internship"), timeout=0.1)
-
-    assert started["ok"] is True
-    assert "продуктовая команда" in started["opening_script"].lower()
-    assert started["turns"][-1]["text"] == bridge.INITIAL_INTERVIEW_QUESTION
-    task = bridge._route_tasks[started["session_id"]]
-    assert not task.done()
-    release_routes.set()
-    await bridge.delete_interview(started["session_id"])
-
-
-@pytest.mark.asyncio
-async def test_finish_waits_for_pending_evaluations_and_marks_failures():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-    fast_model = FastTurnFake([{
-        "kind": "question", "topic_id": "motivation", "text": "Почему backend?", "confidence": 0.8,
-        "candidate_facts": [], "covered_topics": [], "open_threads": [],
-    }])
-    evaluation_model = FastTurnFake([{
-        "scores": {"communication": 4}, "strengths": ["Named personal work"], "growth_areas": [],
-        "uncertainties": [], "evidence": [{"criterion": "communication", "source_turn_id": "turn-2",
-                                               "quote": "I wrote code.", "observation": "Specific example."}],
-    }])
-    queue = BackgroundEvaluationQueue(model=evaluation_model, timeout=1)
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model,
-                           background_evaluation_queue=queue)
-    session = await service.start(resume_text="Student backend project")
-    await service.persist_answer(session.id, "I wrote code.", event_id="report-answer", finish_after_answer=True)
-
-    finished = await service.finish(session.id)
-
-    assert finished.status == "completed"
-    assert finished.report.evidence[0]["quote"] == "I wrote code."
-    assert finished.report.scores == {"communication": None}
-    assert not any("report model" in item.lower() for item in finished.report.uncertainties)
-
-
-@pytest.mark.asyncio
-async def test_finish_local_report_marks_failed_background_analysis():
-    service_type = importlib.import_module("mock_interviewer.service").InterviewService
-
-    class FailedEvaluation:
-        async def create_structured_response(self, **_kwargs):
-            raise RuntimeError("analysis unavailable")
-
-    fast_model = FastTurnFake([{
-        "kind": "question", "topic_id": "motivation", "text": "Почему backend?", "confidence": 0.8,
-        "candidate_facts": [], "covered_topics": [], "open_threads": [],
-    }])
-    queue = BackgroundEvaluationQueue(model=FailedEvaluation(), timeout=1)
-    service = service_type(model=FakeModel([]), resume_parser=FakeResumeParser(), fast_model=fast_model,
-                           background_evaluation_queue=queue)
-    session = await service.start(resume_text="Student backend project")
-    await service.persist_answer(session.id, "Answer", event_id="failed-report-answer", finish_after_answer=True)
-
-    finished = await service.finish(session.id)
-
-    assert finished.status == "completed"
-    assert finished.report.recommendation == "insufficient_data"
-    assert any("turn-2" in item for item in finished.report.uncertainties)
-
-
-def test_voice_server_instructions_require_one_reaction_and_one_question():
-    bridge, voice_probe = _voice_modules()
-    instructions = voice_probe.mcp.instructions.lower()
-    assert "specific listening reaction" in instructions
-    assert "repeat" in instructions or "повтор" in instructions
     assert "record_candidate_answer" in instructions
+    assert "every finalized candidate answer" in instructions.lower()
+    assert "next_action" in instructions
+    assert "finish_interview" in instructions
+    assert "include_transcript=false" in instructions
+    assert "report_markdown" in instructions
+    assert ".pdf" in instructions
+    assert "preparing the final report" in instructions.lower()
+    assert "does not contain or rephrase the next question" in instructions.lower()
+    assert "ask the returned next_turn exactly once" in instructions.lower()
+    assert "test_run_summary" in instructions
+    assert "one call" in instructions.lower()
 
 
 @pytest.mark.asyncio
-async def test_start_returns_local_company_intro_without_waiting_for_model(tmp_path, monkeypatch):
+async def test_voice_turn_uses_one_mcp_call_and_speaks_opening_once(tmp_path, monkeypatch):
     bridge, _ = _voice_modules()
     monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
-    release = asyncio.Event()
-    async def slow_routes(*, timing_recorder=None):
-        await release.wait()
-        return FastTurnFake([]), FastTurnFake([])
-    monkeypatch.setattr(bridge, "_configured_routes", slow_routes)
-    result = await asyncio.wait_for(bridge.start_test_interview(level="internship"), timeout=0.1)
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+    session_id = started["session_id"]
+    assert "backend screening уровня internship" in started["opening_script"].lower()
+    assert "онлайн-магазина" in started["opening_script"].lower()
+    assert "почему backend?" in started["opening_script"].lower()
+
+    result = await bridge.record_candidate_answer(
+        session_id=session_id,
+        transcript="Хочу развивать backend.",
+        event_id="answer-before-question",
+        next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        include_transcript=False,
+    )
+
     assert result["ok"] is True
-    assert "онлайн-магазина" in result["opening_script"].lower()
-    assert result["turns"][-1]["text"] == bridge.INITIAL_INTERVIEW_QUESTION
-    release.set()
-    await bridge.delete_interview(result["session_id"])
+    assert result["candidate_turn"]["text"] == "Хочу развивать backend."
+    assert result["next_turn"]["text"] == "Что вы изучаете?"
+    assert "ask next_turn exactly once" in result["instruction"].lower()
 
 
 @pytest.mark.asyncio
-async def test_mcp_answer_saves_transcript_then_returns_one_fast_question(tmp_path, monkeypatch):
+async def test_combined_voice_turn_logs_answer_and_proposal_stage_timings(tmp_path, monkeypatch):
     bridge, _ = _voice_modules()
     monkeypatch.setattr(bridge, "TEST_RUNS_DIR", tmp_path, raising=False)
-    fast = FastTurnFake([{"kind": "question", "topic_id": "project", "text": "Какую часть API вы сделали сами?",
-                          "confidence": 0.8, "candidate_facts": [], "covered_topics": ["motivation"], "open_threads": []}])
-    analysis = FastTurnFake([{"scores": {}, "evidence": [], "strengths": [], "growth_areas": [], "uncertainties": []}])
-    async def routes(*, timing_recorder=None):
-        fast.timing_recorder = timing_recorder
-        return fast, analysis
-    monkeypatch.setattr(bridge, "_configured_routes", routes)
-    started = await bridge.start_test_interview(level="internship")
-    result = await bridge.record_candidate_answer(started["session_id"], "answer-1", "Я написал API.")
-    assert result["ok"] is True
-    assert result["candidate_turn"]["text"] == "Я написал API."
-    assert result["next_turn"]["text"] == "Какую часть API вы сделали сами?"
-    assert "acknowledgment" not in result
-    await bridge.delete_interview(started["session_id"])
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+
+    try:
+        result = await bridge.record_candidate_answer(
+            session_id=started["session_id"],
+            transcript="Хочу создавать backend-сервисы.",
+            event_id="timed-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+            include_transcript=False,
+        )
+
+        assert result["ok"] is True
+        events = [json.loads(line) for line in Path(started["log_path"]).read_text(encoding="utf-8").splitlines()]
+        answer_saved = next(event for event in events if event["event_name"] == "answer_saved")
+        proposal_validated = next(event for event in events if event["event_name"] == "proposal_validation")
+        combined_call = [event for event in events if event["event_name"] == "mcp_tool_call"][-1]
+        assert answer_saved["duration_ms"] >= 0
+        assert proposal_validated["duration_ms"] >= 0
+        assert combined_call["duration_ms"] >= 0
+        assert events.index(answer_saved) < events.index(proposal_validated)
+    finally:
+        await bridge.delete_interview(started["session_id"])
 
 
 @pytest.mark.asyncio
-async def test_report_is_assembled_locally_and_exported_without_host_json(tmp_path, monkeypatch):
+async def test_combined_voice_turn_leaves_invalid_question_proposal_retryable():
     bridge, _ = _voice_modules()
-    monkeypatch.setattr(bridge, "REPORTS_DIR", tmp_path, raising=False)
-    async def routes(*, timing_recorder=None):
-        return FastTurnFake([]), FastTurnFake([])
-    monkeypatch.setattr(bridge, "_configured_routes", routes)
-    started = await bridge.start_interview(resume_text="Учебный проект на FastAPI", level="internship")
-    result = await bridge.finish_interview(started["session_id"])
-    assert result["ok"] is True
-    assert result["interview_complete"] is True
-    assert Path(result["report_files"]["pdf_path"]).exists()
-    assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
-    await bridge.delete_interview(started["session_id"])
+    started = await bridge.start_test_interview(
+        first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
+    )
+    session_id = started["session_id"]
+
+    try:
+        failed = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend.",
+            event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"unknown","text":"Что вы изучаете?"}',
+        )
+        assert failed["ok"] is False
+        assert failed["answer_saved"] is True
+        assert failed["answer_event_id"] == "retryable-answer-1"
+        assert failed["next_action"] == "propose_next_turn"
+
+        duplicate = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend.",
+            event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        )
+        assert duplicate["duplicate"] is True
+        assert duplicate["answer_saved"] is True
+        assert duplicate["next_action"] == "propose_next_turn"
+
+        retried = await bridge.propose_next_turn(
+            session_id=session_id,
+            answer_event_id="retryable-answer-1",
+            next_turn_json='{"kind":"question","topic_id":"education","text":"Что вы изучаете?"}',
+        )
+        assert retried["ok"] is True
+        assert retried["next_turn"]["text"] == "Что вы изучаете?"
+    finally:
+        await bridge.delete_interview(session_id)
 
 
 @pytest.mark.asyncio
-async def test_report_export_remains_off_event_loop(tmp_path, monkeypatch):
+async def test_report_export_does_not_block_mcp_event_loop(tmp_path, monkeypatch):
     bridge, _ = _voice_modules()
     monkeypatch.setattr(bridge, "REPORTS_DIR", tmp_path, raising=False)
+    export_thread_ids = []
+    event_loop_ticks = []
     original_export = bridge.export_report_files
-    thread_ids, ticks = [], []
+
     def slow_export(*args, **kwargs):
-        thread_ids.append(threading.get_ident())
-        time.sleep(0.04)
+        export_thread_ids.append(threading.get_ident())
+        time.sleep(0.08)
         return original_export(*args, **kwargs)
-    async def routes(*, timing_recorder=None):
-        return FastTurnFake([]), FastTurnFake([])
-    monkeypatch.setattr(bridge, "_configured_routes", routes)
+
     monkeypatch.setattr(bridge, "export_report_files", slow_export)
-    started = await bridge.start_interview(resume_text="Student backend project", level="internship")
-    loop_thread = threading.get_ident()
-    async def tick():
-        await asyncio.sleep(0.005)
-        ticks.append(True)
-    result, _ = await asyncio.gather(bridge.finish_interview(started["session_id"]), tick())
-    assert result["ok"] is True and ticks == [True]
-    assert thread_ids and thread_ids[0] != loop_thread
-    await bridge.delete_interview(started["session_id"])
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+    loop_thread_id = threading.get_ident()
+
+    async def observe_loop():
+        await asyncio.sleep(0.01)
+        event_loop_ticks.append(True)
+
+    try:
+        result, _ = await asyncio.gather(
+            bridge.finish_interview(
+                session_id=session_id,
+                report_json=json.dumps(
+                    {
+                        "recommendation": "insufficient_data",
+                        "scores": {},
+                        "strengths": [],
+                        "growth_areas": [],
+                        "evidence": [],
+                        "uncertainties": ["В тесте нет ответов кандидата."],
+                        "disclaimer": "Учебная обратная связь для практики.",
+                    }
+                ),
+            ),
+            observe_loop(),
+        )
+
+        assert result["ok"] is True
+        assert event_loop_ticks == [True]
+        assert export_thread_ids and export_thread_ids[0] != loop_thread_id
+    finally:
+        await bridge.delete_interview(session_id)
 
 
-@pytest.mark.asyncio
-async def test_report_export_failure_keeps_visible_markdown(monkeypatch):
-    bridge, _ = _voice_modules()
-    def fail_export(*_args, **_kwargs):
-        raise bridge.ReportExportError("write permission denied")
-    async def routes(*, timing_recorder=None):
-        return FastTurnFake([]), FastTurnFake([])
-    monkeypatch.setattr(bridge, "_configured_routes", routes)
-    monkeypatch.setattr(bridge, "export_report_files", fail_export)
-    started = await bridge.start_interview(resume_text="Student backend project", level="internship")
-    result = await bridge.finish_interview(started["session_id"])
-    assert result["ok"] is True
-    assert result["report_files"] is None
-    assert "write permission denied" in result["report_export_error"]
-    await bridge.delete_interview(started["session_id"])
-
-
-@pytest.mark.asyncio
 async def test_interview_progress_requires_topic_coverage_and_at_least_eight_answers():
     plan = importlib.import_module("mock_interviewer.interview_plan")
     Turn = importlib.import_module("mock_interviewer.domain.models").Turn
@@ -410,3 +247,294 @@ async def test_final_answer_is_saved_without_adding_an_unasked_question():
     assert finished_line.status == "awaiting_report"
     assert finished_line.turns[-1].role == "candidate"
     assert not any(turn.role == "interviewer" for turn in finished_line.turns[2:])
+
+
+@pytest.mark.asyncio
+async def test_mcp_logs_each_answer_then_signals_finish_after_full_topic_coverage():
+    bridge, _ = _voice_modules()
+    topics = [
+        "education",
+        "project",
+        "personal_contribution",
+        "teamwork",
+        "challenge",
+        "reflection",
+        "expectations",
+    ]
+    started = await bridge.start_interview(
+        resume_text="Студент, опыт учебного API и командного проекта.",
+        first_turn_json=json.dumps(
+            next_question("motivation", "Почему вас заинтересовал backend?")
+        ),
+    )
+    assert started["ok"] is True
+    session_id = started["session_id"]
+
+    try:
+        for index in range(8):
+            next_turn_json = ""
+            if index < len(topics):
+                next_turn_json = json.dumps(
+                    next_question(topics[index], f"Вопрос по теме {topics[index]}")
+                )
+            result = await bridge.record_candidate_answer(
+                session_id=session_id,
+                transcript=f"Ответ кандидата номер {index + 1}",
+                event_id=f"answer-{index + 1}",
+                next_turn_json=next_turn_json,
+            )
+            assert result["ok"] is True
+            if index < 7:
+                assert result["interview_progress"]["candidate_answers"] == index + 1
+                assert result["next_action"] == "ask_next_question"
+            if index == 0:
+                duplicate = await bridge.record_candidate_answer(
+                    session_id=session_id,
+                    transcript="Ответ кандидата номер 1",
+                    event_id="answer-1",
+                    next_turn_json="invalid on purpose; retries must not consume it",
+                )
+                assert duplicate["duplicate"] is True
+                assert duplicate["interview_progress"]["candidate_answers"] == 1
+
+        assert result["interview_progress"]["candidate_answers"] == 8
+        assert result["interview_progress"]["missing_topics"] == []
+        assert result["next_action"] == "finish_interview"
+        assert result["turns"][-1]["role"] == "candidate"
+
+        completed = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [],
+                    "uncertainties": ["Недостаточно проверяемых примеров для оценки."],
+                    "disclaimer": "Учебная обратная связь для практики, не решение о найме.",
+                }
+            ),
+        )
+        assert completed["status"] == "completed"
+        assert completed["interview_complete"] is True
+        assert "интервью завершено" in completed["instruction"].lower()
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_mcp_accepts_final_transcript_tail_before_report_is_created():
+    bridge, _ = _voice_modules()
+    topics = ["education", "project", "personal_contribution", "teamwork", "challenge", "reflection", "expectations"]
+    started = await bridge.start_interview(
+        resume_text="Студент, опыт backend-проектов.",
+        first_turn_json=json.dumps(next_question("motivation", "Почему backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        for index in range(8):
+            await bridge.record_candidate_answer(
+                session_id=session_id,
+                transcript=f"Ответ {index + 1}",
+                event_id=f"answer-{index + 1}",
+                next_turn_json=(
+                    json.dumps(next_question(topics[index], f"Вопрос {index + 1}"))
+                    if index < len(topics)
+                    else ""
+                ),
+            )
+
+        late = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="И ещё я хочу попробовать разработать полноценный API.",
+            event_id="transcript-tail-1",
+        )
+
+        assert late["ok"] is True
+        assert late["status"] == "awaiting_report"
+        assert late["interview_progress"]["candidate_answers"] == 9
+        assert late["next_action"] == "finish_interview"
+        assert late["candidate_turn"]["text"] == "И ещё я хочу попробовать разработать полноценный API."
+
+        duplicate = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="И ещё я хочу попробовать разработать полноценный API.",
+            event_id="transcript-tail-1",
+        )
+        assert duplicate["duplicate"] is True
+        assert duplicate["interview_progress"]["candidate_answers"] == 9
+
+        completed = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [],
+                    "uncertainties": ["Учебный прогон; в этом тесте оценка не формируется."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+        assert completed["status"] == "completed"
+        assert "turns" not in completed
+        final_status = await bridge.interview_status(session_id=session_id)
+        assert final_status["interview_progress"]["candidate_answers"] == 9
+        assert final_status["turns"][-1]["text"] == "И ещё я хочу попробовать разработать полноценный API."
+
+        too_late = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Это уже после готового отчёта.",
+            event_id="post-report-answer",
+        )
+        assert too_late["ok"] is False
+        assert "no longer accepts" in too_late["error"]
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_compact_voice_response_returns_only_new_turns_and_progress():
+    bridge, _ = _voice_modules()
+    started = await bridge.start_interview(
+        resume_text="Студент, учебный backend-проект.",
+        first_turn_json=json.dumps(next_question("motivation", "Почему backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.record_candidate_answer(
+            session_id=session_id,
+            transcript="Хочу развивать backend-навыки.",
+            event_id="compact-answer-1",
+            next_turn_json=json.dumps(next_question("education", "Что изучали?")),
+            include_transcript=False,
+        )
+
+        assert result["ok"] is True
+        assert "turns" not in result
+        assert result["candidate_turn"]["text"] == "Хочу развивать backend-навыки."
+        assert result["next_turn"]["text"] == "Что изучали?"
+        assert result["interview_progress"]["candidate_answers"] == 1
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_report_error_names_unknown_evidence_criterion_for_repair():
+    bridge, _ = _voice_modules()
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "mixed_signal",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [
+                        {
+                            "criterion": "expectations",
+                            "source_turn_id": "resume",
+                            "quote": "Student backend project",
+                            "observation": "The resume mentions a project.",
+                        }
+                    ],
+                    "uncertainties": [],
+                    "disclaimer": "Training practice feedback.",
+                }
+            ),
+        )
+
+        assert result["ok"] is False
+        assert "expectations" in result["error"]
+        assert "Allowed criteria" in result["error"]
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_finish_returns_visible_markdown_and_exported_report_files(tmp_path, monkeypatch):
+    bridge, _ = _voice_modules()
+    monkeypatch.setattr(bridge, "REPORTS_DIR", tmp_path, raising=False)
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": ["Добавить конкретные примеры."],
+                    "evidence": [],
+                    "uncertainties": ["В тесте нет ответов кандидата."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+
+        assert result["ok"] is True
+        assert result["interview_complete"] is True
+        assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
+        assert Path(result["report_files"]["markdown_path"]).exists()
+        assert Path(result["report_files"]["pdf_path"]).exists()
+        assert result["report_files"]["markdown_path"].endswith(".md")
+        assert result["report_files"]["pdf_path"].endswith(".pdf")
+    finally:
+        await bridge.delete_interview(session_id)
+
+
+@pytest.mark.asyncio
+async def test_report_export_failure_preserves_visible_validated_markdown(monkeypatch):
+    bridge, _ = _voice_modules()
+    export_module = importlib.import_module("mock_interviewer.report_export")
+
+    def fail_export(*_args, **_kwargs):
+        raise export_module.ReportExportError("write permission denied")
+
+    monkeypatch.setattr(bridge, "export_report_files", fail_export)
+    started = await bridge.start_interview(
+        resume_text="Student backend project",
+        first_turn_json=json.dumps(next_question("motivation", "Why backend?")),
+    )
+    session_id = started["session_id"]
+
+    try:
+        result = await bridge.finish_interview(
+            session_id=session_id,
+            report_json=json.dumps(
+                {
+                    "recommendation": "insufficient_data",
+                    "scores": {},
+                    "strengths": [],
+                    "growth_areas": [],
+                    "evidence": [],
+                    "uncertainties": ["В тесте нет ответов кандидата."],
+                    "disclaimer": "Учебная обратная связь для практики.",
+                }
+            ),
+        )
+
+        assert result["ok"] is True
+        assert result["interview_complete"] is True
+        assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
+        assert result["report_files"] is None
+        assert "write permission denied" in result["report_export_error"]
+    finally:
+        await bridge.delete_interview(session_id)

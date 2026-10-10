@@ -26,20 +26,6 @@ class InterviewReport:
 
 
 @dataclass
-class InterviewContextState:
-    candidate_facts: list[str] = field(default_factory=list)
-    covered_topics: list[str] = field(default_factory=list)
-    open_threads: list[str] = field(default_factory=list)
-
-
-@dataclass
-class FastTurnResult:
-    state: InterviewContextState
-    next_turn: "NextTurn"
-    session: "InterviewSession"
-
-
-@dataclass
 class InterviewSession:
     id: str
     status: str
@@ -53,9 +39,7 @@ class InterviewSession:
     pending_answer_event_id: str | None = None
     event_payloads: dict[str, str] = field(default_factory=dict, repr=False)
     proposal_payloads: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
-    fast_turn_results: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     version: int = 0
-    context_state: InterviewContextState = field(default_factory=InterviewContextState)
 
 
 @dataclass
