@@ -37,9 +37,9 @@ def _turns() -> list[Turn]:
 
 
 def test_markdown_contains_full_report_and_readable_evidence_sources():
-    markdown = render_report_markdown(_report(), _turns())
+    markdown = render_report_markdown(_report(), _turns(), level="junior")
 
-    assert "# Отчёт HR-интервью — Backend Internship" in markdown
+    assert "# Отчёт Backend Screening — Junior" in markdown
     assert "## Рекомендация" in markdown
     assert "Смешанный сигнал" in markdown
     assert "## Сильные стороны" in markdown
@@ -64,7 +64,7 @@ def test_export_writes_cyrillic_markdown_and_searchable_pdf(tmp_path: Path):
     assert pdf_path.read_bytes().startswith(b"%PDF-")
 
     extracted_pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf_path).pages)
-    assert "Отчёт HR-интервью" in extracted_pdf_text
+    assert "Отчёт Backend Screening" in extracted_pdf_text
     assert "Хочу развивать backend-навыки." in extracted_pdf_text
     assert "это не решение о найме" in extracted_pdf_text
 

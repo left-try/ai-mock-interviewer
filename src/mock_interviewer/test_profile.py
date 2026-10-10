@@ -1,4 +1,4 @@
-"""Fictional profile used only for resume-free interview test runs."""
+"""Fictional profiles used only for resume-free interview test runs."""
 
 SYNTHETIC_BACKEND_PROFILE = """
 Синтетический кандидат Backend Internship.
@@ -7,3 +7,18 @@ SYNTHETIC_BACKEND_PROFILE = """
 backend-разработки и production-систем отсутствует. Хочет научиться проектировать
 API и работать в команде. Все сведения вымышлены и нужны только для практического интервью.
 """.strip()
+
+SYNTHETIC_BACKEND_PROFILES = {
+    "internship": SYNTHETIC_BACKEND_PROFILE,
+    "junior": """
+Кандидат: вымышленный Junior Backend Engineer. Окончил обучение по Python и устроился на первую backend-роль год назад.
+В команде онлайн-магазина исправлял API заказов на Python/FastAPI, добавлял проверки входных данных, писал unit-тесты и разбирал ошибки по логам.
+Самостоятельно реализовал небольшой endpoint под ревью старшего разработчика; коммерческий опыт ограничен одной командой.
+""".strip(),
+    "middle": """
+Кандидат: вымышленный Middle Backend Engineer с четырьмя годами коммерческого опыта.
+В продуктовой команде онлайн-магазина самостоятельно поставлял API каталога и заказов на Python, PostgreSQL и Redis.
+Проектировал миграции, оптимизировал медленные запросы, добавлял метрики и алерты, отвечал за выкладки и разбор инцидентов.
+Согласовывал изменения с frontend и product, проводил код-ревью и помогал двум junior-разработчикам.
+""".strip(),
+}

@@ -49,7 +49,7 @@ async def test_voice_turn_uses_one_mcp_call_and_speaks_opening_once(tmp_path, mo
         first_turn_json='{"kind":"question","topic_id":"motivation","text":"Почему backend?"}'
     )
     session_id = started["session_id"]
-    assert "стажировку backend-разработчика" in started["opening_script"].lower()
+    assert "backend screening уровня internship" in started["opening_script"].lower()
     assert "онлайн-магазина" in started["opening_script"].lower()
     assert "почему backend?" in started["opening_script"].lower()
 
@@ -491,7 +491,7 @@ async def test_finish_returns_visible_markdown_and_exported_report_files(tmp_pat
 
         assert result["ok"] is True
         assert result["interview_complete"] is True
-        assert "# Отчёт HR-интервью" in result["report_markdown"]
+        assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
         assert Path(result["report_files"]["markdown_path"]).exists()
         assert Path(result["report_files"]["pdf_path"]).exists()
         assert result["report_files"]["markdown_path"].endswith(".md")
@@ -533,7 +533,7 @@ async def test_report_export_failure_preserves_visible_validated_markdown(monkey
 
         assert result["ok"] is True
         assert result["interview_complete"] is True
-        assert "# Отчёт HR-интервью" in result["report_markdown"]
+        assert "# Отчёт Backend Screening — Internship" in result["report_markdown"]
         assert result["report_files"] is None
         assert "write permission denied" in result["report_export_error"]
     finally:
