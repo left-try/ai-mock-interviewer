@@ -25,11 +25,14 @@ mcp = MCPServer(
     version="0.1.0",
     instructions=(
         "For a real interview, this MCP session is the authoritative interview record. For every "
-        "finalized candidate answer, begin one brief, specific listening reaction while the tool call "
-        "runs, then call record_candidate_answer once with the exact transcript and a fresh event_id. "
+        "interview startup, resolve ChatGPT Plan Usage access and model setup before asking the candidate "
+        "to choose Internship, Junior, or Middle. For every finalized candidate answer, call "
+        "record_candidate_answer once with the exact transcript and a fresh event_id, then stay silent "
+        "while the tool call runs so spoken output cannot overlap playback when the result arrives. "
         "The server persists the answer before the fast subscription model generates one adaptive "
-        "question. The tool does not return a second acknowledgment. Ask the returned next_turn exactly "
-        "once after success and never repeat or paraphrase it in a neighboring message. Reuse an event_id "
+        "question. The tool does not return a second acknowledgment. After success, speak one single utterance "
+        "with one brief, specific listening reaction followed by the returned next_turn exactly once. Wait "
+        "for playback to finish before speaking again; never queue, interrupt, repeat, or paraphrase it. Reuse an event_id "
         "only for the identical answer. If answer_saved=true and next_action=retry_saved_answer, the "
         "answer is durable; retry record_candidate_answer with the same event_id and transcript. Use "
         "candidate_turn, next_turn, interview_progress, and "

@@ -6,6 +6,7 @@ import base64
 import asyncio
 import hashlib
 import http.server
+import html
 import json
 import queue
 import secrets
@@ -32,6 +33,10 @@ SERVICE_NAME = "ai-mock-interviewer.chatgpt-plan"
 class SubscriptionAuthError(RuntimeError):
     """Safe-to-display authorization failure without response bodies or tokens."""
 
+    def __init__(self, message: str, *, stage: str | None = None):
+        super().__init__(message)
+        self.stage = stage
+
 
 @dataclass(frozen=True)
 class LoginAttempt:
@@ -51,6 +56,67 @@ class AccountStatus:
     email: str | None = None
     scopes: tuple[str, ...] = ()
     expires_at: float | None = None
+
+
+@dataclass
+class _CallbackDelivery:
+    query: dict[str, str]
+    completed: threading.Event
+    succeeded: bool = False
+
+
+def _callback_page(succeeded: bool) -> str:
+    """Render the local OAuth receipt after the app has finished validating the callback."""
+    if succeeded:
+        eyebrow = "Connection complete"
+        title = "ChatGPT plan is connected"
+        message = "Your account is ready for interview model setup. Return to Codex to continue."
+        symbol = "✓"
+        status = "success"
+    else:
+        eyebrow = "Connection not completed"
+        title = "Your ChatGPT account could not be connected"
+        message = "Return to Codex to see the next step. You can close this page."
+        symbol = "!"
+        status = "failure"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{html.escape(title)} · AI Mock Interviewer</title>
+  <style>
+    :root {{ color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f3f5f8; color: #142033; }}
+    * {{ box-sizing: border-box; }}
+    body {{ min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; background: radial-gradient(ellipse at 50% 0%, #e3ebff 0, transparent 55%), #f3f5f8; }}
+    main {{ width: min(100%, 520px); padding: clamp(28px, 7vw, 48px); border: 1px solid #e3e8f0; border-radius: 24px; background: rgba(255,255,255,.96); box-shadow: 0 24px 80px rgba(34, 51, 84, .13); text-align: center; }}
+    .mark {{ display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 24px; border-radius: 20px; background: #edf2ff; color: #344ec5; font-size: 30px; font-weight: 700; }}
+    .mark.success {{ background: #e7f7ef; color: #137548; }}
+    .mark.failure {{ background: #fff1ed; color: #a33b22; }}
+    .eyebrow {{ margin: 0 0 10px; color: #596a83; font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }}
+    h1 {{ margin: 0; color: #142033; font-size: clamp(25px, 6vw, 34px); line-height: 1.15; letter-spacing: -.035em; }}
+    .message {{ margin: 18px auto 0; max-width: 38ch; color: #506079; font-size: 16px; line-height: 1.65; }}
+    .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #e8ecf2; color: #738198; font-size: 13px; }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{ background: #101522; color: #eaf0fa; }} body {{ background: radial-gradient(ellipse at 50% 0%, #1b2b50 0, transparent 55%), #101522; }}
+      main {{ border-color: #303b50; background: rgba(24, 32, 48, .97); box-shadow: 0 24px 80px rgba(0, 0, 0, .35); }}
+      h1 {{ color: #f0f4fc; }} .eyebrow, .message, .footer {{ color: #b5c0d2; }} .footer {{ border-color: #354057; }}
+      .mark {{ background: #283455; color: #b8c7ff; }} .mark.success {{ background: #173b30; color: #8ee0b2; }} .mark.failure {{ background: #472b29; color: #ffae98; }}
+    }}
+    @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation-duration: .01ms !important; transition-duration: .01ms !important; }} }}
+  </style>
+</head>
+<body>
+  <main aria-labelledby="receipt-title">
+    <div class="mark {status}" aria-hidden="true">{symbol}</div>
+    <p class="eyebrow">{eyebrow}</p>
+    <h1 id="receipt-title">{title}</h1>
+    <p class="message">{message}</p>
+    <p class="footer">AI Mock Interviewer · Secure account connection</p>
+  </main>
+</body>
+</html>"""
 
 
 class _KeyringCredentials:
@@ -76,7 +142,7 @@ class ChatGPTPlanAuth:
         self._callback_servers = {}
 
     def begin_login(self, *, expected_account_id: str | None = None, client_id: str | None = None) -> LoginAttempt:
-        callback_queue: queue.Queue[dict[str, str]] = queue.Queue(maxsize=1)
+        callback_queue: queue.Queue[_CallbackDelivery] = queue.Queue(maxsize=1)
 
         class CallbackHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -85,15 +151,22 @@ class ChatGPTPlanAuth:
                     self.send_error(404)
                     return
                 values = {key: items[0] for key, items in parse_qs(parsed.query).items() if items}
+                delivery = _CallbackDelivery(values, threading.Event())
                 try:
-                    callback_queue.put_nowait(values)
+                    callback_queue.put_nowait(delivery)
                 except queue.Full:
                     self.send_error(409)
                     return
-                body = b"Sign-in received. You can return to AI Mock Interviewer."
+                # Do not show a success receipt until code exchange, identity validation,
+                # and secure credential persistence have all completed in wait_for_callback.
+                delivery.completed.wait(timeout=90)
+                body = _callback_page(delivery.succeeded).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -151,8 +224,13 @@ class ChatGPTPlanAuth:
             raise SubscriptionAuthError("The sign-in callback listener is unavailable")
         server, callback_queue = entry
         try:
-            query = await asyncio.to_thread(callback_queue.get, True, timeout)
-            return await asyncio.to_thread(self.complete_login, query)
+            delivery = await asyncio.to_thread(callback_queue.get, True, timeout)
+            try:
+                result = await asyncio.to_thread(self.complete_login, delivery.query)
+                delivery.succeeded = result.connected
+                return result
+            finally:
+                delivery.completed.set()
         except queue.Empty as exc:
             self._attempts.pop(attempt.state, None)
             raise SubscriptionAuthError("ChatGPT sign-in timed out; start a new connection attempt") from exc
@@ -184,6 +262,7 @@ class ChatGPTPlanAuth:
             raise SubscriptionAuthError("The sign-in callback returned a different client registration")
         if not issued_client_id or issued_client_id == "dynamic_agent_client":
             raise SubscriptionAuthError("ChatGPT did not complete the app registration")
+        stage = "token_exchange"
         try:
             response = self.http.post(TOKEN_ENDPOINT, data={
                 "grant_type": "authorization_code", "client_id": issued_client_id,
@@ -192,6 +271,7 @@ class ChatGPTPlanAuth:
             })
             response.raise_for_status()
             tokens = response.json()
+            stage = "grant_validation"
             scopes = frozenset(str(tokens.get("scope", "")).split())
             if not REQUIRED_SCOPES.issubset(scopes):
                 raise SubscriptionAuthError("The ChatGPT account did not grant all required plan-usage scopes")
@@ -206,7 +286,9 @@ class ChatGPTPlanAuth:
                 "scopes": sorted(scopes), "expires_at": time.time() + int(tokens.get("expires_in", 0)),
                 "token_type": tokens.get("token_type", "Bearer"),
             }
+            stage = "credential_storage"
             old_metadata = self.credentials.get(f"account:{account_id}:metadata")
+            old_active_account = self.credentials.get("active_account")
             version = self._store_tokens(account_id, tokens)
             record["token_version"] = version
             try:
@@ -216,14 +298,24 @@ class ChatGPTPlanAuth:
                 self._delete_token_version(account_id, version)
                 if old_metadata:
                     self.credentials.set(f"account:{account_id}:metadata", old_metadata)
+                else:
+                    self.credentials.delete(f"account:{account_id}:metadata")
+                if old_active_account:
+                    self.credentials.set("active_account", old_active_account)
+                else:
+                    self.credentials.delete("active_account")
                 raise
             if old_metadata:
                 self._delete_token_version(account_id, json.loads(old_metadata).get("token_version"))
             return AccountStatus(True, account_id, claims.get("email"), tuple(sorted(scopes)), record["expires_at"])
-        except SubscriptionAuthError:
+        except SubscriptionAuthError as exc:
+            if exc.stage is None:
+                exc.stage = stage
             raise
         except Exception as exc:
-            raise SubscriptionAuthError("ChatGPT sign-in could not be completed or securely stored") from exc
+            raise SubscriptionAuthError(
+                "ChatGPT sign-in could not be completed or securely stored", stage=stage,
+            ) from exc
 
     def status(self) -> AccountStatus:
         account_id = self.credentials.get("active_account")
@@ -336,4 +428,3 @@ class ChatGPTPlanAuth:
         if not secrets.compare_digest(str(claims.get("nonce", "")), nonce):
             raise SubscriptionAuthError("The sign-in identity nonce did not match this authorization attempt")
         return claims
-

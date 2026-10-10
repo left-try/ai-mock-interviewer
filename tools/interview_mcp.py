@@ -177,7 +177,10 @@ async def connect_chatgpt_plan() -> dict:
                 "email": status.email, "scopes": list(status.scopes)}
     except Exception as exc:
         auth.cancel_login(attempt)
-        return {"ok": False, "error": str(exc)}
+        result = {"ok": False, "connected": False, "error": str(exc)}
+        if getattr(exc, "stage", None):
+            result["stage"] = exc.stage
+        return result
 
 
 @mcp.tool()

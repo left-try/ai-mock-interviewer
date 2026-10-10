@@ -5,6 +5,7 @@ import json
 import time
 
 import httpx
+import pytest
 
 from mock_interviewer.subscription_auth import ChatGPTPlanAuth, SubscriptionAuthError
 
@@ -38,6 +39,22 @@ def test_login_uses_pkce_and_loopback_callback():
     assert query["client_id"] == ["dynamic_agent_client"]
     assert {"resource.invoke", "chatgpt.tokens.use.direct", "offline_access"}.issubset(set(query["scope"][0].split()))
     assert attempt.state and attempt.nonce and attempt.code_verifier
+
+
+def test_callback_receipt_has_distinct_accessible_success_and_failure_states():
+    from mock_interviewer.subscription_auth import _callback_page
+
+    success = _callback_page(True).lower()
+    failure = _callback_page(False).lower()
+
+    assert "chatgpt plan is connected" in success
+    assert "your chatgpt account could not be connected" in failure
+    assert "sign-in received" not in success
+    assert "sign-in received" not in failure
+    for page in (success, failure):
+        assert "<meta name=\"viewport\"" in page
+        assert "<main" in page
+        assert "return to codex" in page
 
 
 def _token_client(tokens, calls=None):
@@ -172,6 +189,29 @@ def test_credential_store_failure_fails_closed():
         assert False, "credential storage failure must fail closed"
     except Exception as exc:
         assert "securely stored" in str(exc)
+        assert getattr(exc, "stage", None) == "credential_storage"
     assert not any(":tokens:" in key for key in credentials.values)
     assert credentials.get("active_account") is None
+    auth.cancel_login(attempt)
+
+
+def test_failed_active_account_commit_rolls_back_new_metadata_and_tokens():
+    class ActiveAccountWriteFailure(MemoryCredentials):
+        def set(self, key, value):
+            if key == "active_account":
+                raise OSError("credential store unavailable")
+            super().set(key, value)
+
+    credentials = ActiveAccountWriteFailure()
+    auth = ChatGPTPlanAuth(credentials=credentials, http_client=_token_client(_valid_tokens()))
+    attempt = auth.begin_login()
+    auth._validate_id_token = lambda *_: {"sub": "account", "nonce": attempt.nonce}
+
+    with pytest.raises(SubscriptionAuthError) as error:
+        auth.complete_login({"state": attempt.state, "code": "code", "client_id": "oaiapp-issued"})
+
+    assert error.value.stage == "credential_storage"
+    assert credentials.get("active_account") is None
+    assert credentials.get("account:account:metadata") is None
+    assert not any(":tokens:" in key for key in credentials.values)
     auth.cancel_login(attempt)
