@@ -15,6 +15,19 @@ def test_plan_access_is_resolved_before_asking_for_interview_level():
         assert "after this succeeds" in workflow or "after plan access and model setup succeed" in workflow
 
 
+def test_account_connection_is_explained_before_opening_connection_flow():
+    for relative in (
+        ".agents/skills/backend-internship-interviewer/SKILL.md",
+        ".agents/skills/test-backend-interview/SKILL.md",
+    ):
+        workflow = (ROOT / relative).read_text(encoding="utf-8").lower()
+        explanation = workflow.index("first tell the candidate")
+        connection = workflow.index("connect_chatgpt_plan")
+        assert explanation < connection
+        assert "need to connect their chatgpt account" in workflow
+        assert "never imply that the account connected unless the tool confirms it" in workflow
+
+
 def test_voice_turns_do_not_start_speech_while_tool_call_is_running():
     workflow = (ROOT / ".agents/skills/backend-internship-interviewer/SKILL.md").read_text(encoding="utf-8").lower()
     test_workflow = (ROOT / ".agents/skills/test-backend-interview/SKILL.md").read_text(encoding="utf-8").lower()
