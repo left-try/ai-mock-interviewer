@@ -31,6 +31,7 @@ class InterviewSession:
     status: str
     resume_text: str
     test_mode: bool = False
+    level: str = "internship"
     turns: list[Turn] = field(default_factory=list)
     report: InterviewReport | None = None
     event_results: dict[str, "InterviewSession"] = field(default_factory=dict, repr=False)

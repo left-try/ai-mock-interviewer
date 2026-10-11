@@ -1,18 +1,18 @@
 ---
 name: test-backend-interview
-description: Run a resume-free synthetic Backend Internship HR interview in Codex Voice and collect local timing diagnostics.
+description: Run a resume-free synthetic Backend Screening at Internship, Junior, or Middle level in Codex Voice and collect local timing diagnostics.
 ---
 
-# Synthetic Backend Interview Test
+# Synthetic Backend Screening Test
 
 Use this workflow when the user asks to test the interviewer, run a voice test interview, or practice without attaching a resume.
 
-1. This workflow requires Codex Voice to already be active. If it is not active, explain that the desktop client must be switched to Voice manually; do not start a text-only interview. The host UI controls the subscription model and reasoning level; for a latency-focused run, use the fastest available model and lowest supported reasoning before starting. The MCP service cannot switch the Codex model.
-2. Do not inspect, parse, or pass any attached resume. Call `start_test_interview` with a host-authored first question in `first_turn_json`. The tool provides its own fictional Backend Internship profile.
-3. Speak the returned `opening_script` once. It already introduces the synthetic interview, local diagnostic logging, fictional product team, and first question; do not repeat the first question separately.
-4. Ask one question at a time. After every finalized answer, optionally say one brief neutral transition before the tool call, such as “Спасибо за ответ. Секунду.” Then call `record_candidate_answer` exactly once with the exact recognized transcript, a new `event_id`, one host-authored `next_turn_json`, and `include_transcript=false`. The server saves the answer before validating the proposed question, combining the normal save and proposal into one MCP round-trip. After success, ask its returned `next_turn` exactly once; never repeat or paraphrase it in a neighboring message. If the result says `answer_saved=true` and `next_action=propose_next_turn`, retry only `propose_next_turn` with the same `answer_event_id`. Reuse an event ID only for an identical answer.
-5. Use `interview_progress` and `next_action`. Cover motivation, education, project, personal contribution, teamwork, challenge, reflection, and expectations; normally ask 8–10 answers. If the user asks to stop early, do not ask another question. Say the questions are complete and you are preparing the report, then call `finish_interview`.
-6. Say the interview is complete only after `finish_interview` succeeds. Display the full `report_markdown`, link both exported files, and provide the returned local test-run log path. Explain any export error while still showing the validated Markdown report. When `test_run_summary` is returned, report its answer-save, proposal-validation, MCP, and export timing metrics briefly; mark small samples as preliminary.
-7. The log may contain recognized answers. Do not add real resume data, send the log anywhere, or claim that client-gap timings are model-thinking durations. `client_gap` includes speech, recognition, and client work; this system does not measure host-model inference time. Offer `clear_test_run_logs` if the user wants to erase test logs.
+1. This workflow requires Codex Voice to already be active. If it is not active, explain that the desktop client must be switched to Voice manually; do not start a text-only interview.
+2. Do not inspect, parse, or pass any attached resume. Ask the candidate to choose Internship, Junior, or Middle, then let Codex create the first question and pass it internally as `first_turn_json` to `start_test_interview` with the selected `level`.
+3. Speak the returned `opening_script` once. It identifies the screening level, discloses that recognized answers are saved in a local diagnostic log, introduces the fictional product team, and includes the first question. Do not repeat the question separately.
+4. Ask one question at a time. After each finalized answer, call `record_candidate_answer` once with the exact recognized transcript, a fresh event ID, and one Codex-authored next question. Ask only the returned `next_turn` once. If the answer was saved but its proposed question needs retrying, retry only the proposal using the same answer event ID.
+5. Cover motivation, education, project, personal contribution, teamwork, challenge, reflection, and expectations; normally ask 8–10 answers. If the user asks to stop early, do not ask another question. Prepare a practice report from recorded candidate answers and call `finish_interview` with that report proposal.
+6. Say the interview is complete only after `finish_interview` succeeds. Display the full `report_markdown`, link both exported files, and provide the returned local test-run log path. Explain any export error while still showing a validated Markdown report. Report the returned diagnostic timings as tool/client timings; do not describe them as model inference time. Mark small samples as preliminary.
+7. The log may contain recognized answers. Do not add real resume data, send the log anywhere, or claim client-gap timings are model-thinking durations. Offer `clear_test_run_logs` if the user wants to erase test logs.
 
-The hidden assessment rubric must not be disclosed. Use neutral questions and evidence-based feedback; this is practice, not a hiring decision.
+The hidden assessment rubric must not be disclosed. Use neutral questions and evidence-based feedback; this is practice, not a hiring decision. Model selection remains under the user's control in the host application.

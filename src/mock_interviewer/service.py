@@ -26,6 +26,7 @@ from .errors import (
 from .graph import build_graph
 from .prompts import interview_messages, report_messages
 from .resume import ResumeParser
+from .scenarios import normalize_level
 
 
 class NextTurnSchema(BaseModel):
@@ -85,16 +86,21 @@ class InterviewService:
         except Exception as exc:
             raise ModelProviderError() from exc
 
-    async def start(self, *, resume_text: str, test_mode: bool = False) -> InterviewSession:
+    async def start(self, *, resume_text: str, test_mode: bool = False,
+                    level: str = "internship") -> InterviewSession:
+        level = normalize_level(level)
         text = self._validate_resume_text(resume_text)
         session = InterviewSession(
             id=str(uuid.uuid4()),
             status="active",
             resume_text=text,
             test_mode=test_mode,
+            level=level,
         )
         try:
-            value = await self._invoke(interview_messages(text, [], rubric=self.rubric), NextTurnSchema)
+            value = await self._invoke(
+                interview_messages(text, [], rubric=self.rubric, level=level), NextTurnSchema
+            )
             next_turn = self._validate_next_turn(value)
         except (InvalidModelOutput, ModelProviderError):
             raise
@@ -176,7 +182,9 @@ class InterviewService:
                 return self._copy(session)
             try:
                 value = await self._invoke(
-                    interview_messages(session.resume_text, proposed_turns, rubric=self.rubric),
+                    interview_messages(
+                        session.resume_text, proposed_turns, rubric=self.rubric, level=session.level,
+                    ),
                     NextTurnSchema,
                 )
                 next_turn = self._validate_next_turn(value)
@@ -310,6 +318,7 @@ class InterviewService:
                         session.turns,
                         rubric=self.rubric,
                         test_mode=session.test_mode,
+                        level=session.level,
                     ),
                     ReportSchema,
                 )

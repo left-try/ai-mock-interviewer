@@ -1,6 +1,6 @@
 # Codex Voice → MCP: probe and interview MVP
 
-The original tools in this server remain a temporary transcript probe. The same stdio server now also exposes the LangGraph-backed internship HR interview. Probe calls only validate voice transcript delivery; interview calls validate turn proposals, candidate events, session state, and the report.
+The original tools in this server remain a temporary transcript probe. The same stdio server now also exposes the LangGraph-backed Backend Screening for Internship, Junior, and Middle. Probe calls only validate voice transcript delivery; interview calls validate turn proposals, candidate events, session state, and the report.
 
 ## Install and register
 
@@ -40,7 +40,7 @@ This does not validate raw audio access, partial transcripts, speech latency, in
 
 ## Resume-free interview and diagnostics
 
-Start `/test-backend-interview` in Codex Voice. The server uses a fictional Backend Internship profile and does not inspect attached resumes. Before the opening question, it discloses that recognized answers are saved in a local per-run JSONL log under `%LOCALAPPDATA%\ai-mock-interviewer\test-runs`. Logs are retained for 30 days. `clear_test_run_logs` removes test-run logs without touching report or voice-probe files.
+Start `/test-backend-interview` in Codex Voice and choose Internship, Junior, or Middle. The server uses a fictional profile for that level and does not inspect attached resumes. Before the opening question, it discloses that recognized answers are saved in a local per-run JSONL log under `%LOCALAPPDATA%\ai-mock-interviewer\test-runs`. Logs are retained for 30 days. `clear_test_run_logs` removes test-run logs without touching report or voice-probe files.
 
 Analyze a log with `python scripts/summarize_test_run.py <log.jsonl>`. The summary reports distinct MCP stages and percentiles when there are at least five samples. `client_gap_ms` measures time between MCP calls and may include speech, recognition, and host work; it is not model thinking time or voice TTFT.
 

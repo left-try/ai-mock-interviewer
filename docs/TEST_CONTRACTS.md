@@ -41,7 +41,7 @@ Calls are asynchronous. Invalid user input raises `ValueError` or a documented a
 ## Voice interview workflow contract
 
 - The voice host records every finalized candidate answer through `record_candidate_answer` before asking another question. Each answer has a distinct idempotency key; a retry reuses the same key and cannot duplicate the answer.
-- The active Backend Internship HR interview covers motivation, education, project experience, personal contribution, teamwork, a challenge, reflection, and expectations. The normal target is 8–10 candidate answers.
+- The active Backend Screening covers motivation, education, project experience, personal contribution, teamwork, a challenge, reflection, and expectations at Internship, Junior, or Middle depth. The normal target is 8–10 candidate answers.
 - The host follows deterministic `interview_progress` and `next_action` fields returned by MCP. It must announce completion itself when directed, then request the report without inventing an extra unanswered question.
 - `record_candidate_answer` supports a compact voice mode that returns only the latest saved answer, the next interviewer turn, and progress. It does not resend the full transcript on each turn.
 - If a finalized transcript tail arrives after the session enters `awaiting_report` but before report creation, it is appended exactly once and included in the report. A completed report remains immutable.

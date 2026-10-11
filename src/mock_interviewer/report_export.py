@@ -24,6 +24,7 @@ from reportlab.platypus import (
 )
 
 from .interview_plan import REQUIRED_TOPICS, interview_progress
+from .scenarios import level_label, normalize_level
 
 CRITERION_LABELS = {
     "self_presentation": "Самопрезентация",
@@ -77,12 +78,13 @@ def _score_bar(score: int | None) -> str:
     return f"{'■' * score}{'□' * (5 - score)} {score}/5"
 
 
-def render_report_markdown(report, turns) -> str:
+def render_report_markdown(report, turns, *, level: str = "internship") -> str:
+    level_name = level_label(level)
     source_labels = _source_labels(turns)
     covered, required, missing = _coverage_data(turns)
     coverage_bar = f"{'●' * covered}{'○' * (required - covered)}"
     lines = [
-        "# Отчёт HR-интервью — Backend Internship",
+        f"# Отчёт Backend Screening — {level_name}",
         "",
         "## Рекомендация и вердикт",
         "",
@@ -143,18 +145,20 @@ def export_report_files(
     *,
     output_dir: Path | str | None = None,
     markdown: str | None = None,
+    level: str = "internship",
 ) -> dict[str, str]:
-    markdown = markdown if markdown is not None else render_report_markdown(report, turns)
+    level = normalize_level(level)
+    markdown = markdown if markdown is not None else render_report_markdown(report, turns, level=level)
     directory = Path(output_dir) if output_dir is not None else default_reports_dir()
     safe_id = re.sub(r"[^a-zA-Z0-9]", "", session_id)[:32] or "session"
-    stem = f"backend-internship-report-{safe_id}"
+    stem = f"backend-screening-{level}-report-{safe_id}"
     markdown_path = directory / f"{stem}.md"
     pdf_path = directory / f"{stem}.pdf"
 
     try:
         directory.mkdir(parents=True, exist_ok=True)
         markdown_path.write_text(markdown, encoding="utf-8", newline="\n")
-        _write_pdf(report, turns, markdown_path, pdf_path)
+        _write_pdf(report, turns, markdown_path, pdf_path, level=level)
     except (OSError, ReportExportError) as exc:
         raise ReportExportError(f"Could not export the interview report: {exc}") from exc
 
@@ -215,7 +219,8 @@ def _font_path() -> Path:
     raise ReportExportError("No installed TrueType font with Cyrillic coverage was found for PDF export.")
 
 
-def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path) -> None:
+def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path, *, level: str = "internship") -> None:
+    title = f"Отчёт Backend Screening — {level_label(level)}"
     font_name = "InterviewerReportFont"
     if font_name not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(font_name, str(_font_path())))
@@ -246,7 +251,7 @@ def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path) -> None:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
     story = [
-        Paragraph("Отчёт HR-интервью — Backend Internship", styles["ReportTitleRu"]),
+        Paragraph(html.escape(title), styles["ReportTitleRu"]),
         Paragraph("Вердикт и покрытие", styles["ReportHeadingRu"]),
         verdict_panel,
         Paragraph(f"Покрытые темы: {covered} из {required} · {'●' * covered}{'○' * (required - covered)}", styles["ReportBodyRu"]),
@@ -320,7 +325,7 @@ def _write_pdf(report, turns, markdown_path: Path, pdf_path: Path) -> None:
         str(pdf_path), pagesize=A4,
         rightMargin=22 * mm, leftMargin=22 * mm,
         topMargin=20 * mm, bottomMargin=20 * mm,
-        title="Отчёт HR-интервью — Backend Internship",
+        title=title,
         author="AI Mock Interviewer",
     )
     def draw_page_number(canvas, doc):

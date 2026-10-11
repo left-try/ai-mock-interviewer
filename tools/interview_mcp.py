@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from voice_probe import mcp
 
@@ -21,17 +21,18 @@ from mock_interviewer.report_export import (
     render_report_markdown,
 )
 from mock_interviewer.service import InterviewService
-from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILE
+from mock_interviewer.scenarios import level_label, normalize_level
+from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILES
 from mock_interviewer.test_run_log import TestRunLog, default_test_runs_dir
 from mock_interviewer.test_run_summary import summarize_events
 
 
 class HostProposalModel:
-    """Adapter for the subscription model already hosting Codex Voice.
+    """Adapter for structured proposals supplied by Codex Voice.
 
     The host supplies a structured proposal as an MCP argument. LangGraph passes
     that proposal through the same validation boundary used by model adapters.
-    No separate API key or paid inference endpoint is needed for the voice MVP.
+    The local interviewer does not select or call a model.
     """
 
     def __init__(self):
@@ -92,6 +93,7 @@ def _public_session(session, *, include_transcript=True):
         "session_id": session.id,
         "status": session.status,
         "test_mode": session.test_mode,
+        "level": session.level,
         "interview_progress": interview_progress(session.turns),
         "report": None if session.report is None else {
             "recommendation": session.report.recommendation,
@@ -108,12 +110,14 @@ def _public_session(session, *, include_transcript=True):
     return result
 
 
-def _opening_script(question: str, *, test_mode: bool) -> str:
+def _opening_script(question: str, *, test_mode: bool, level: str = "internship") -> str:
+    level = normalize_level(level)
+    level_name = level_label(level)
     disclosure = (
-        "Это синтетическое собеседование на стажировку backend-разработчика; распознанные ответы "
+        f"Это синтетическое собеседование Backend Screening уровня {level_name}; распознанные ответы "
         "сохраняются в локальном диагностическом журнале. "
         if test_mode
-        else "Это тренировочное интервью на стажировку backend-разработчика. "
+        else f"Это тренировочное интервью Backend Screening уровня {level_name}. "
     )
     return (
         f"Здравствуйте! {disclosure}Представим, что мы — продуктовая команда онлайн-магазина и развиваем "
@@ -179,20 +183,25 @@ def _fail_test_call(session_id: str, started_at: float, stage: str, exc: Excepti
 
 
 @mcp.tool()
-async def start_interview(resume_text: str, first_turn_json: str) -> dict:
-    """Start Backend Internship HR practice; save each answer before proposing its next question."""
+async def start_interview(
+    resume_text: str,
+    first_turn_json: str,
+    level: Literal["internship", "junior", "middle"] = "internship",
+) -> dict:
+    """Start Backend Screening at the selected level with a Codex-authored first question."""
     try:
+        level = normalize_level(level)
         proposal = _decode(first_turn_json, "first_turn_json")
         model = HostProposalModel()
         model.provide(proposal)
         service = InterviewService(model=model)
-        session = await service.start(resume_text=resume_text)
+        session = await service.start(resume_text=resume_text, level=level)
         with _sessions_lock:
             _sessions[session.id] = (service, model)
         return {
             "ok": True,
             **_public_session(session),
-            "opening_script": _opening_script(session.turns[-1].text, test_mode=False),
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=False, level=level),
             "next_action": "ask_next_question",
             "instruction": (
                 "Speak opening_script as one opening; the first question is already included, so do not "
@@ -214,17 +223,24 @@ async def start_interview(resume_text: str, first_turn_json: str) -> dict:
 
 
 @mcp.tool()
-async def start_test_interview(first_turn_json: str) -> dict:
-    """Start a resume-free synthetic interview and disclose local answer logging."""
+async def start_test_interview(
+    first_turn_json: str,
+    level: Literal["internship", "junior", "middle"] = "internship",
+) -> dict:
+    """Start a resume-free synthetic Backend Screening at the selected level."""
     started_at = time.perf_counter()
     try:
+        level = normalize_level(level)
         proposal = _decode(first_turn_json, "first_turn_json")
         model = HostProposalModel()
         model.provide(proposal)
         service = InterviewService(model=model)
-        session = await service.start(resume_text=SYNTHETIC_BACKEND_PROFILE, test_mode=True)
         run_id = str(uuid.uuid4())
         logger = TestRunLog(root=TEST_RUNS_DIR)
+        session = await service.start(
+            resume_text=SYNTHETIC_BACKEND_PROFILES[level], test_mode=True,
+            level=level,
+        )
         with _sessions_lock:
             _sessions[session.id] = (service, model)
             _test_runs[session.id] = (run_id, logger)
@@ -250,12 +266,13 @@ async def start_test_interview(first_turn_json: str) -> dict:
             "ok": True,
             **_public_session(session),
             "test_mode": True,
-            "opening_script": _opening_script(session.turns[-1].text, test_mode=True),
+            "opening_script": _opening_script(session.turns[-1].text, test_mode=True, level=level),
             "run_id": run_id,
             "log_path": str((Path(TEST_RUNS_DIR) / f"{run_id}.jsonl").resolve()),
             "next_action": "ask_next_question",
             "instruction": (
-                "Произнеси opening_script целиком: он содержит раскрытие тестового режима и первый вопрос. "
+                "Произнеси opening_script целиком: он сообщает о локальном диагностическом журнале, "
+                "раскрывает тестовый режим и содержит первый вопрос. "
                 "После каждого завершённого ответа, если уместно, произнеси короткое нейтральное "
                 "'Спасибо за ответ. Секунду.' Затем одним вызовом record_candidate_answer передай "
                 "точную транскрипцию, новый event_id и один следующий вопрос в next_turn_json. Сервер "
@@ -591,7 +608,7 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
         if test_run:
             _append_test_event(session_id, "report_validation", duration_ms=validation_duration)
         markdown_started = time.perf_counter()
-        report_markdown = render_report_markdown(session.report, session.turns)
+        report_markdown = render_report_markdown(session.report, session.turns, level=session.level)
         markdown_duration = (time.perf_counter() - markdown_started) * 1000
         if test_run:
             _append_test_event(session_id, "markdown_render", duration_ms=markdown_duration)
@@ -604,6 +621,7 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
                 session.id,
                 output_dir=REPORTS_DIR,
                 markdown=report_markdown,
+                level=session.level,
             )
             report_files = {"markdown_path": files["markdown_path"], "pdf_path": files["pdf_path"]}
             export_error = None
