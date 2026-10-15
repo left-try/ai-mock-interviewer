@@ -667,9 +667,13 @@ async def finish_interview(session_id: str, report_json: str) -> dict:
             "test_run_summary": test_run_summary,
             "diagnostic_warning": diagnostic_warning,
             "instruction": (
-                "Tell the candidate clearly in their language that the interview is complete "
-                "(for example, say ‘Интервью завершено’), display report_markdown visibly in "
-                "the chat, and provide the Markdown and PDF report_files. If report_export_error "
+                "After this tool succeeds, tell the candidate clearly in their language that the "
+                "interview is complete (for example, say ‘Интервью завершено’). In Codex Voice, "
+                "the next user-visible report item must start exactly with "
+                "::codex-realtime-inline{} and contain the complete report_markdown, links to "
+                "both report_files, and the test_run_log_path when present. A spoken summary or "
+                "claim that the report is below does not display it; do not claim visibility until "
+                "that inline item is emitted. If report_export_error "
                 "is present, still display the validated Markdown report and clearly explain "
                 "that the file exports could not be saved. If recommendation is insufficient_data, "
                 "explain that evidence was limited. If test_run_summary is present, summarize its "
