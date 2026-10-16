@@ -12,6 +12,31 @@ REQUIRED_TOPICS = (
     "reflection",
     "expectations",
 )
+
+# A compact competency map keeps the interview grounded in signals instead of
+# growing an unbounded question bank. These guides inform adaptive probes; they
+# are not a checklist to recite to the candidate.
+TOPIC_SIGNALS = {
+    "motivation": "role relevance, intentionality, concise self-positioning",
+    "education": "fundamentals, learning habits, and relevant coursework or personal work",
+    "project": "problem, constraints, architecture, decisions, trade-offs, outcomes, and reflection",
+    "personal_contribution": "what the candidate personally designed, implemented, proposed, or debugged",
+    "teamwork": "communication, disagreement, collaboration, and influence appropriate to level",
+    "challenge": "problem solving, accountability, action taken, outcome, and learning",
+    "reflection": "calibration, lessons learned, and what the candidate would change",
+    "expectations": "role understanding, candidate priorities, and thoughtful questions",
+}
+
+FOLLOW_UP_PLAYBOOK = {
+    "vague_claim": "Ask for one concrete example or observable detail.",
+    "resume_claim": "Select one material resume claim and ask what the candidate personally owned.",
+    "technology_choice": "Ask why that option fit the constraints, what alternative was considered, and the trade-off.",
+    "team_claim": "Clarify the candidate's own actions separately from what the team did.",
+    "impact_claim": "Ask what changed and how the result was observed or measured.",
+    "design_claim": "Probe a relevant boundary, failure mode, or changed constraint.",
+    "uncertainty": "Allow the candidate to state what they do not know, then assess their reasoning and how they would verify it.",
+}
+
 MIN_CANDIDATE_ANSWERS = 8
 MAX_CANDIDATE_ANSWERS = 10
 
