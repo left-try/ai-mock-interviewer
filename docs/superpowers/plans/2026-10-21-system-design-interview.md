@@ -1,12 +1,12 @@
 # План реализации: system design интервью
 
 - Связанная спека: [2026-10-21-system-design-interview-design.md](../specs/2026-10-21-system-design-interview-design.md)
-- Статус: для планирования; реализация не начата
+- Статус: spike event→MCP завершён; Excalidraw adapter и host smoke test не начаты
 - Ветка документации: `left-try/docs/system-design-interview`
 
 ## Цель реализации
 
-Добавить отдельный system design сценарий в существующий интервью-контур, реализовать браузерную canvas с передачей структурированных событий и выпускать доказательный отчёт. G0 проверяет event transport и порядок сохранения; Codex screenshot/browser automation и MCP Apps UI исследуются отдельно и не являются обязательными зависимостями MVP.
+Добавить отдельный system design сценарий в существующий интервью-контур, встроить Excalidraw как первую доску, передавать нормализованные структурированные события и выпускать доказательный отчёт. G0 разделён на проверку Excalidraw adapter и live Codex host; screenshot/browser automation и MCP Apps UI исследуются отдельно и не являются обязательными зависимостями MVP.
 
 ## Принципы реализации
 
@@ -20,16 +20,17 @@
 
 ### Задачи
 
-1. Подготовить локальную HTML canvas-страницу с добавлением/изменением/удалением узла и связи и последовательным cursor.
-2. Подключить страницу к локальному service endpoint, который валидирует и сохраняет события по `session_id` и возвращает cursor.
-3. Проверить в целевом Codex Desktop Voice полный цикл `draw → persist → read delta through MCP → ask follow-up`, уникальность события/version, сохранение candidate answer до capture и задержку/payload.
-4. Отдельно вернуть один static image MCP content и проверить, получает ли его Codex Voice как visual input; отдельно проверить MCP Apps UI, если host surface его поддерживает.
-5. Зафиксировать support matrix для browser-to-service delta (обязательный), MCP image, MCP Apps UI и внешнего browser automation.
-6. Принять G0: structured delta становится каналом MVP; image/UI остаются optional. При провале structured delta оставить text/voice-only; не подменять его неподтверждённым screenshot polling.
+1. Подготовить локальную React-страницу с зафиксированной версией `@excalidraw/excalidraw` и подключить `onChange`/`excalidrawAPI.onChange`.
+2. Реализовать Excalidraw adapter: нормализовать add/move/edit/delete фигур и стрелок в разрешённые типы событий, фиксировать scene snapshot на заданных границах.
+3. Подключить страницу к локальному service endpoint, валидировать/сохранять события по `session_id`, выдавать cursor; сохранить текущую простую canvas как transport smoke fixture, не как production board.
+4. Проверить G0a: Excalidraw actions → adapter → persisted events/snapshot, идемпотентность, порядок, payload limits и candidate-answer persistence-before-read.
+5. Проверить G0b в целевом Codex Desktop Voice: полный цикл `draw → persist → read delta through MCP → ask follow-up`, корректная ссылка на event/version и задержка.
+6. Отдельно вернуть static image MCP content и проверить visual input; отдельно проверить MCP Apps UI, если host surface поддерживает его.
+7. Зафиксировать support matrix для встроенного Excalidraw delta (обязательный), MCP image, MCP Apps UI и внешнего browser automation. При провале G0a оставить text/voice-only; если проходит G0a, но не G0b, не считать live Codex whiteboard interview поддержанным.
 
 ### Выход и критерий
 
-Короткий ADR/заметка о проверенном режиме и стабильный test contract. Spike успешен, если add/edit/delete дают ровно три упорядоченных события, они доступны через MCP в той же сессии и позволяют Codex сослаться на конкретный новый event при follow-up. Если нет — оставить интервью text/voice-only; image/UI не считаются заменой без отдельного решения.
+Короткий ADR/заметка о проверенном режиме и стабильный test contract. G0a успешен, если Excalidraw add/move/edit/delete/connect дают корректную нормализованную последовательность в той же сессии. G0b успешен, если целевой Codex Voice получает событие через MCP и использует его при follow-up. Не заявлять production whiteboard interview, пока оба gate не пройдены.
 
 ## Этап 1 — доменная модель и сценарий
 
@@ -56,7 +57,7 @@
 ### Задачи
 
 1. Определить порт `WhiteboardAdapter` и нейтральные модели `BoardEvent`, `BoardCursor`, `BoardStatus`, `BoardSnapshotReference`.
-2. Реализовать `FakeWhiteboardAdapter` и local canvas adapter для синтетических contract/integration тестов.
+2. Реализовать `FakeWhiteboardAdapter` и contract adapter fixtures; добавить production Excalidraw adapter после прохождения G0a.
 3. Добавить сбор deltas по cursor, snapshot reference, последовательность, timestamps, deduplication и обнаружение пропуска версии.
 4. Применить consent/session scoping, ограничение размера, таймаут, rate limit и закрытие adapter на finish/delete.
 5. Реализовать только тот реальный Codex capture adapter, который подтверждён на этапе 0. В ином случае добавить ручное вложение снимка, если оно доступно в продукте и прошло privacy review; иначе оставить text-only режим.
@@ -64,7 +65,7 @@
 ### Тесты
 
 - Unit: нормализация и порядок; duplicate/ conflicting IDs; cursor replay; missing sequence; empty board; malformed/oversized payload; timeout/disconnect.
-- Adapter contract: одинаковый набор тестов прогнать против fake, local canvas и реального adapter.
+- Adapter contract: одинаковый набор тестов прогнать против fake и Excalidraw adapter; transport smoke fixture оставить для проверки HTTP/MCP границы.
 - Privacy tests: adapter не возвращает URL/cookies/текст посторонних вкладок; лог не содержит payload доски.
 
 ### Выход
@@ -135,7 +136,7 @@ Codex Skill способен провести полный текстовый/г
 | Зависимость | Нужно до | Если не выполнено |
 |---|---|---|
 | Browser-to-service event transport в локальной сессии | Структурированного whiteboard adapter | Text/voice-only; не делать polling screenshot |
-| Выбор первой production whiteboard | Production adapter | Оставить нейтральный контракт и local canvas тесты |
+| Зафиксированная версия Excalidraw и mapping scene elements в нормализованную схему | Production adapter | Оставить нейтральный контракт и fake/local fixtures; не подключать сторонние board сайты |
 | Сценарная задача и факты ответов | Диалоговые интеграционные тесты | Использовать синтетический fixture, не оценивать вручную импровизацию модели |
 | Подтверждённая рубрика/anchors | Пользовательский итоговый report | Возвращать report как beta/insufficient data, не публиковать оценочные выводы |
 
@@ -143,4 +144,4 @@ Codex Skill способен провести полный текстовый/г
 
 `Этап 0 → Этап 1 → Этап 2 и 3 → Этап 4 → Этап 5`.
 
-Этапы 2 и 3 можно разрабатывать параллельно только после фиксации общих event/turn schemas. До завершения G0 реализация ограничена local canvas/fake adapter и текстовым интервью. Конкретный внешний поставщик доски и поддержка нескольких Codex клиентов требуют отдельных решений и отдельных acceptance gates.
+Этапы 2 и 3 можно разрабатывать параллельно только после фиксации общих event/turn schemas. До завершения G0a реализация ограничена adapter fixtures и текстовым интервью; до G0b live whiteboard поведение Codex не считается подтверждённым. Поддержка произвольной вкладки excalidraw.com и нескольких Codex клиентов требует отдельных решений и acceptance gates.
