@@ -14,24 +14,30 @@ _ALLOWED_KINDS = {
     "node_added",
     "node_updated",
     "node_moved",
+    "node_resized",
     "node_deleted",
     "edge_added",
+    "edge_updated",
     "edge_deleted",
 }
 _REQUIRED_FIELDS = {
     "node_added": {"node_id", "label"},
     "node_updated": {"node_id", "label"},
     "node_moved": {"node_id", "x", "y"},
+    "node_resized": {"node_id", "width", "height"},
     "node_deleted": {"node_id"},
     "edge_added": {"edge_id", "source_id", "target_id"},
+    "edge_updated": {"edge_id"},
     "edge_deleted": {"edge_id"},
 }
 _ALLOWED_FIELDS = {
-    "node_added": {"node_id", "label", "x", "y"},
+    "node_added": {"node_id", "label", "x", "y", "width", "height", "angle", "shape_type"},
     "node_updated": {"node_id", "label"},
     "node_moved": {"node_id", "x", "y"},
+    "node_resized": {"node_id", "width", "height", "angle"},
     "node_deleted": {"node_id"},
     "edge_added": {"edge_id", "source_id", "target_id", "label"},
+    "edge_updated": {"edge_id", "source_id", "target_id", "label"},
     "edge_deleted": {"edge_id"},
 }
 
@@ -135,6 +141,10 @@ class BoardEventStore:
         keys = set(payload)
         if not _REQUIRED_FIELDS[kind].issubset(keys) or not keys.issubset(_ALLOWED_FIELDS[kind]):
             raise ValueError("payload fields do not match event kind")
+        if kind == "node_updated" and not keys.intersection({"label"}):
+            raise ValueError("node_updated requires at least one changed field")
+        if kind == "edge_updated" and not keys.intersection({"source_id", "target_id", "label"}):
+            raise ValueError("edge_updated requires at least one changed field")
         for field in ("node_id", "edge_id", "source_id", "target_id", "label"):
             if field in payload and (
                 not isinstance(payload[field], str)
@@ -142,11 +152,13 @@ class BoardEventStore:
                 or len(payload[field]) > 200
             ):
                 raise ValueError(f"{field} must be a non-empty string of at most 200 characters")
-        for field in ("x", "y"):
+        for field in ("x", "y", "width", "height", "angle"):
             if field in payload and (
                 isinstance(payload[field], bool)
                 or not isinstance(payload[field], (int, float))
                 or not math.isfinite(payload[field])
                 or abs(payload[field]) > 100_000
             ):
-                raise ValueError(f"{field} must be a finite coordinate in range")
+                raise ValueError(f"{field} must be a finite number in range")
+        if "shape_type" in payload and payload["shape_type"] not in {"rectangle", "ellipse", "diamond"}:
+            raise ValueError("shape_type must be a supported Excalidraw shape")
