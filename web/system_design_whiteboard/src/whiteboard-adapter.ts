@@ -7,7 +7,11 @@ export type BoardEvent = {
     | "node_deleted"
     | "edge_added"
     | "edge_updated"
-    | "edge_deleted";
+    | "edge_deleted"
+    | "note_added"
+    | "note_updated"
+    | "note_moved"
+    | "note_deleted";
   payload: Record<string, string | number>;
 };
 
@@ -47,6 +51,7 @@ type EdgeProjection = {
 export type SceneProjection = {
   nodes: Map<string, NodeProjection>;
   edges: Map<string, EdgeProjection>;
+  notes: Map<string, { note_id: string; text: string; x: number; y: number }>;
 };
 
 const nodeTypes = new Set<NodeProjection["shape_type"]>(["rectangle", "ellipse", "diamond"]);
@@ -82,25 +87,32 @@ export function projectScene(elements: readonly SceneElement[]): SceneProjection
   }
 
   const edges = new Map<string, EdgeProjection>();
+  const notes = new Map<string, { note_id: string; text: string; x: number; y: number }>();
   for (const element of live) {
-    if (element.type !== "arrow") continue;
-    const sourceId = element.startBinding?.elementId;
-    const targetId = element.endBinding?.elementId;
-    if (!sourceId || !targetId || !nodes.has(sourceId) || !nodes.has(targetId)) continue;
-    edges.set(element.id, {
-      edge_id: element.id,
-      source_id: sourceId,
-      target_id: targetId,
-      label: labels.get(element.id),
-    });
+    if (element.type === "arrow") {
+      const sourceId = element.startBinding?.elementId;
+      const targetId = element.endBinding?.elementId;
+      if (!sourceId || !targetId || !nodes.has(sourceId) || !nodes.has(targetId)) continue;
+      edges.set(element.id, {
+        edge_id: element.id,
+        source_id: sourceId,
+        target_id: targetId,
+        label: labels.get(element.id),
+      });
+    }
+    if (element.type === "text" && !element.containerId) {
+      const text = cleanText(element.text);
+      if (text) notes.set(element.id, { note_id: element.id, text, x: finite(element.x), y: finite(element.y) });
+    }
   }
-  return { nodes, edges };
+  return { nodes, edges, notes };
 }
 
 export function diffScenes(previous: SceneProjection, current: SceneProjection): BoardEvent[] {
   const events: BoardEvent[] = [];
   const edgeDeletions: BoardEvent[] = [];
   const nodeDeletions: BoardEvent[] = [];
+  const noteDeletions: BoardEvent[] = [];
 
   for (const [id, next] of current.nodes) {
     const prior = previous.nodes.get(id);
@@ -148,7 +160,19 @@ export function diffScenes(previous: SceneProjection, current: SceneProjection):
   for (const id of previous.nodes.keys()) {
     if (!current.nodes.has(id)) nodeDeletions.push({ kind: "node_deleted", payload: { node_id: id } });
   }
-  return [...events, ...edgeDeletions, ...nodeDeletions];
+  for (const [id, next] of current.notes) {
+    const prior = previous.notes.get(id);
+    if (!prior) {
+      events.push({ kind: "note_added", payload: { note_id: id, text: next.text, x: next.x, y: next.y } });
+      continue;
+    }
+    if (prior.text !== next.text) events.push({ kind: "note_updated", payload: { note_id: id, text: next.text } });
+    if (prior.x !== next.x || prior.y !== next.y) events.push({ kind: "note_moved", payload: { note_id: id, x: next.x, y: next.y } });
+  }
+  for (const id of previous.notes.keys()) {
+    if (!current.notes.has(id)) noteDeletions.push({ kind: "note_deleted", payload: { note_id: id } });
+  }
+  return [...events, ...edgeDeletions, ...nodeDeletions, ...noteDeletions];
 }
 
-export const emptyProjection = (): SceneProjection => ({ nodes: new Map(), edges: new Map() });
+export const emptyProjection = (): SceneProjection => ({ nodes: new Map(), edges: new Map(), notes: new Map() });

@@ -18,7 +18,6 @@ type PersistedEvent = {
 };
 
 type ResettableSceneApi = {
-  resetScene: () => void;
   onPointerDown: (callback: () => void) => () => void;
   onPointerUp: (callback: () => void) => () => void;
 };
@@ -29,7 +28,7 @@ const sessionFromLocation = (): string => {
 };
 
 export function WhiteboardApp() {
-  const [sessionId, setSessionId] = useState(sessionFromLocation);
+  const [sessionId] = useState(sessionFromLocation);
   const [api, setApi] = useState<ResettableSceneApi | null>(null);
   const [status, setStatus] = useState("Connecting to local interview service…");
   const [lastSaved, setLastSaved] = useState(0);
@@ -148,21 +147,6 @@ export function WhiteboardApp() {
     [commitLatestScene],
   );
 
-  const beginFreshSession = () => {
-    const newId = `demo-${crypto.randomUUID()}`;
-    if (timerRef.current !== undefined) window.clearTimeout(timerRef.current);
-    timerRef.current = undefined;
-    queueRef.current = [];
-    setPendingCount(0);
-    setUnsentScene(false);
-    sequenceRef.current = 1;
-    previousRef.current = emptyProjection();
-    latestRef.current = emptyProjection();
-    api?.resetScene();
-    setSessionId(newId);
-    window.history.replaceState(null, "", `?session_id=${encodeURIComponent(newId)}`);
-  };
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -171,9 +155,7 @@ export function WhiteboardApp() {
           <h1>Whiteboard</h1>
         </div>
         <div className="session-control">
-          <label htmlFor="session">Session</label>
-          <code id="session">{sessionId}</code>
-          <button type="button" onClick={beginFreshSession} disabled={pendingCount > 0 || (unsentScene && sessionReady)}>New session</button>
+          <span>{sessionReady ? "Interview session connected" : "Connecting interview session"}</span>
           <button type="button" onClick={() => void flushQueue()} disabled={pendingCount === 0}>Retry save</button>
         </div>
       </header>

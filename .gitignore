@@ -9,3 +9,4 @@ build/
 *.egg-info/
 .voice-probe/
 node_modules/
+spikes/system_design_whiteboard_probe/.data/
