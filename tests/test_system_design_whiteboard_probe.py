@@ -182,4 +182,3 @@ async def test_mcp_tool_exposes_only_new_structured_board_events(tmp_path):
         "next_cursor": 1,
         "has_more": False,
     }
-
