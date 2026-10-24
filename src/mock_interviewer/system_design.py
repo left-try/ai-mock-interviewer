@@ -42,6 +42,19 @@ CRITERIA = {
 }
 LEVELS = {"internship", "junior", "middle"}
 SCENARIOS = {"url-shortener"}
+URL_SHORTENER_FACTS = {
+    "daily_active_users": 100_000_000,
+    "redirects_per_user_per_day": 3,
+    "redirect_reads_per_link_creation": 100,
+    "average_redirect_rps": 3_500,
+    "peak_redirect_rps": 20_000,
+    "average_link_creations_per_day": 1_000_000,
+    "redirect_p95_ms": 100,
+    "redirect_p99_ms": 200,
+    "redirect_availability": "99.95%",
+    "creation_p95_ms": 300,
+    "new_link_visibility_seconds": 5,
+}
 MAX_ANSWER_CHARS = 8_000
 MAX_TURN_TEXT_CHARS = 1_000
 MAX_BOARD_EVENTS_PER_SESSION = 1_000
@@ -399,6 +412,14 @@ class SystemDesignInterviewService:
             raise InvalidReport("Report must include every system design criterion exactly once.")
         if not all(isinstance(items, list) and len(items) <= 10 and all(isinstance(item, str) and len(item) <= 500 for item in items) for items in (strengths, growth_areas, uncertainties)):
             raise InvalidReport("Report lists must contain at most 10 concise text items.")
+        candidate_text = " ".join(turn.text for turn in session.turns if turn.role == "candidate")
+        report_prose = " ".join([
+            summary,
+            *(str(item.get("assessment", "")) for item in criteria if isinstance(item, dict)),
+            *(text for group in (strengths, growth_areas, uncertainties) for text in group if isinstance(text, str)),
+        ])
+        if _is_russian_dominant(candidate_text) and not _is_russian_dominant(report_prose):
+            raise InvalidReport("Отчёт для русскоязычного интервью должен быть написан по-русски.")
         turns = {turn.id: turn for turn in session.turns}
         board_events = {event["event_id"]: event for event in session.board_events}
         validated = []
@@ -483,6 +504,12 @@ def _normalize_question(value: str) -> str:
     return re.sub(r"[^\w]+", " ", value.casefold(), flags=re.UNICODE).strip()
 
 
+def _is_russian_dominant(value: str) -> bool:
+    cyrillic = sum("а" <= char.casefold() <= "я" or char.casefold() == "ё" for char in value)
+    latin = sum("a" <= char.casefold() <= "z" for char in value)
+    return cyrillic >= 12 and cyrillic > latin
+
+
 def public_system_design_turn(turn: SystemDesignTurn) -> dict[str, Any]:
     return {
         "id": turn.id,
@@ -523,7 +550,7 @@ def render_system_design_report(session: SystemDesignSession) -> str:
             if ref["source_type"] == "turn":
                 lines.append(f"- Доказательство, {ref['source_id']}: «{ref['quote']}»")
             else:
-                lines.append(f"- Доска, событие {ref['sequence']} ({ref['source_id']}): {ref['note']}")
+                lines.append(f"- Наблюдение по доске: {ref['note']}")
         lines.append("")
     if session.report["strengths"]:
         lines.extend(["## Сильные стороны", *[f"- {item}" for item in session.report["strengths"]], ""])
