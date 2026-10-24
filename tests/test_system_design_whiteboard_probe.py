@@ -32,6 +32,34 @@ def test_appends_ordered_board_events_and_reads_only_after_cursor(tmp_path):
     }
 
 
+def test_interview_start_build_helper_builds_missing_bundle_and_refreshes_availability(tmp_path, monkeypatch):
+    import tools.interview_mcp as interview_mcp
+
+    package_dir = tmp_path / "web" / "system_design_whiteboard"
+    package_dir.mkdir(parents=True)
+    static_root = tmp_path / "dist"
+    static_root.mkdir()
+    calls = []
+
+    def fake_run(args, *, cwd, **kwargs):
+        calls.append((args, cwd))
+        if args[-1] == "build":
+            (static_root / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setattr(interview_mcp, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(interview_mcp, "STATIC_ROOT", static_root)
+    monkeypatch.setattr(interview_mcp.subprocess, "run", fake_run)
+    interview_mcp._whiteboard_adapter.ui_available = False
+    interview_mcp._whiteboard_adapter.unavailable_reason = "excalidraw_ui_not_built"
+
+    interview_mcp._ensure_whiteboard_ui()
+
+    assert [args for args, _ in calls] == [["npm", "ci"], ["npm", "run", "build"]]
+    assert all(cwd == package_dir for _, cwd in calls)
+    assert interview_mcp._whiteboard_adapter.ui_available is True
+    assert interview_mcp._whiteboard_adapter.unavailable_reason is None
+
+
 def test_replaying_same_event_is_idempotent_but_conflicting_replay_is_rejected(tmp_path):
     store = BoardEventStore(tmp_path)
     payload = {"node_id": "n1", "label": "API"}

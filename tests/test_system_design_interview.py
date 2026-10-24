@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from mock_interviewer.errors import InvalidReport, InvalidSessionTransition
-from mock_interviewer.system_design import CRITERIA, SystemDesignInterviewService
+from mock_interviewer.system_design import CRITERIA, URL_SHORTENER_FACTS, SystemDesignInterviewService
 
 
 @pytest.mark.asyncio
@@ -18,6 +18,22 @@ async def test_start_defaults_to_text_only_when_candidate_does_not_consent():
     assert session.board_url is None
     assert session.turns[0].role == "interviewer"
     assert session.turns[0].phase == "discovery"
+
+
+def test_url_shortener_scenario_has_one_fixed_workload_and_slo_baseline():
+    assert URL_SHORTENER_FACTS == {
+        "daily_active_users": 100_000_000,
+        "redirects_per_user_per_day": 3,
+        "redirect_reads_per_link_creation": 100,
+        "average_redirect_rps": 3_500,
+        "peak_redirect_rps": 20_000,
+        "average_link_creations_per_day": 1_000_000,
+        "redirect_p95_ms": 100,
+        "redirect_p99_ms": 200,
+        "redirect_availability": "99.95%",
+        "creation_p95_ms": 300,
+        "new_link_visibility_seconds": 5,
+    }
 
 
 @pytest.mark.asyncio
@@ -109,4 +125,21 @@ async def test_report_requires_exact_quote_from_candidate_answer():
     assert finished.status == "completed"
     assert len(finished.report["criteria"]) == len(CRITERIA)
     assert finished.report["disclaimer"] == service.DISCLAIMER
+
+
+@pytest.mark.asyncio
+async def test_russian_interview_rejects_english_report_prose():
+    service = SystemDesignInterviewService()
+    session = await service.start(level="middle", board_consent=False)
+    session = await service.persist_answer(
+        session.id, "Я спроектирую сервис и выберу PostgreSQL для хранения ссылок.",
+        event_id="answer-final", finish_after_answer=True,
+    )
+    report = _valid_report(turn_id="turn-2", quote="PostgreSQL для хранения ссылок")
+    report["summary"] = "The candidate presented a coherent design."
+    for criterion in report["criteria"]:
+        criterion["assessment"] = "The candidate gave a workable answer."
+
+    with pytest.raises(InvalidReport, match="должен быть написан по-русски"):
+        await service.finish(session.id, report)
 
