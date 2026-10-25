@@ -155,7 +155,7 @@ export function WhiteboardApp() {
           <h1>Whiteboard</h1>
         </div>
         <div className="session-control">
-          <span>{sessionReady ? "Interview session connected" : "Connecting interview session"}</span>
+          <span>{unsentScene ? "Canvas changes pending" : sessionReady ? "Interview session connected" : "Connecting interview session"}</span>
           <button type="button" onClick={() => void flushQueue()} disabled={pendingCount === 0}>Retry save</button>
         </div>
       </header>
