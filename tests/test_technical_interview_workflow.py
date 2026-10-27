@@ -38,6 +38,23 @@ def report(turn_id, quote):
     }
 
 
+def test_voice_skill_contract_covers_calibration_stack_deep_dive_and_report():
+    root = Path(__file__).resolve().parents[1]
+    skill = (root / ".agents/skills/technical-stack-interviewer/SKILL.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "Codex Voice" in skill
+    normalized = skill.lower()
+    assert normalized.index("start with calibration") < normalized.index("estimate the candidate's level") < normalized.index("choose a stack") < normalized.index("start the deep dive")
+    assert "any backend stack" in skill.lower()
+    assert "one question at a time" in skill.lower()
+    assert "same `event_id`" in skill
+    assert "exact quote" in skill.lower()
+    assert "cancel_technical_interview" in skill
+    assert "delete_technical_interview" in skill
+    assert "::codex-realtime-inline{}" in skill
+    assert "technical-stack-interviewer" in readme
+
+
 @pytest.mark.asyncio
 async def test_mcp_workflow_calibrates_selects_stack_and_finishes_with_evidence():
     bridge = _bridge()

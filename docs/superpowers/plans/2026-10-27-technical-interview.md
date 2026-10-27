@@ -44,15 +44,15 @@
 - select_stack(session_id, stack) accepts any non-empty trimmed string up to 120 characters, stores it as untrusted candidate data, and transitions once from stack_selection to deep_dive.
 - The report proposal contains estimated_level, confidence (low, medium, high), scores keyed by technical_fundamentals, runtime_and_execution, concurrency_and_memory, stack_internals, and practical_reasoning (each 1–5 or null), strengths, growth_areas, evidence, uncertainties, and disclaimer.
 
-- [ ] Step 1: Write failing service tests for valid startup, unknown level rejection, calibration phase/topic validation, answer persistence, event idempotency, proposal retry, transition to stack selection after four calibration answers, arbitrary stack acceptance, deep-dive progression, early stop, cancellation/deletion, and report evidence/score validation.
+- [x] Step 1: Write failing service tests for valid startup, invalid calibration topic, answer persistence, event idempotency, proposal retry, transition to stack selection after four calibration answers, arbitrary stack acceptance, deep-dive progression, early stop, cancellation/deletion, and report evidence/score validation.
 
-- [ ] Step 2: Run python -m pytest tests/test_technical_interview.py -q and confirm the tests fail because the service does not exist.
+- [x] Step 2: Run python -m pytest tests/test_technical_interview.py -q and confirm the tests fail because the service does not exist.
 
-- [ ] Step 3: Implement TechnicalInterviewService using the state transition and evidence validation conventions in the current interview services. Persist each finalized answer before validating a proposed next turn. Allow up to two follow-ups per topic. Require at least three calibration answers before stack selection; accept up to six deep-dive answers, with candidate-requested early finish permitted at every phase. Report validation must verify turn IDs and exact quote substrings; scores without evidence are invalid, and insufficient evidence uses null scores and low confidence.
+- [x] Step 3: Implement TechnicalInterviewService using the state transition and evidence validation conventions in the current interview services. Persist each finalized answer before validating a proposed next turn. Allow up to two follow-ups per topic. Require at least three calibration answers before stack selection; accept up to six deep-dive answers, with candidate-requested early finish permitted at every phase. Report validation must verify turn IDs and exact quote substrings; scores without evidence are invalid, and insufficient evidence uses null scores and low confidence.
 
-- [ ] Step 4: Run python -m pytest tests/test_technical_interview.py -q and confirm all service contracts pass.
+- [x] Step 4: Run python -m pytest tests/test_technical_interview.py -q and confirm all service contracts pass.
 
-- [ ] Step 5: Commit the service and tests as [feat] add technical interview domain service.
+- [x] Step 5: Commit the service and tests as [feat] add technical interview domain service.
 
 ### Task 2: Dedicated technical interview MCP workflow
 
@@ -67,15 +67,15 @@
 - Stack selection stores the stack and the exact selected stack as a candidate turn before accepting the first validated deep-dive question. Invalid proposals leave both saved so the question can be retried with the same event_id.
 - Finish returns a rendered Markdown report only after successful evidence validation.
 
-- [ ] Step 1: Write failing MCP workflow tests for start, full calibration-to-stack-to-deep-dive flow, exact-once answer persistence, invalid-proposal retry, status transcript, early finish, invalid report evidence, cancellation, and deletion.
+- [x] Step 1: Write failing MCP workflow tests for start, full calibration-to-stack-to-deep-dive flow, exact-once answer persistence, invalid-proposal retry, status transcript, early finish, invalid report evidence, cancellation, and deletion.
 
-- [ ] Step 2: Run python -m pytest tests/test_technical_interview_workflow.py -q and confirm the new tool contract is absent.
+- [x] Step 2: Run python -m pytest tests/test_technical_interview_workflow.py -q and confirm the new tool contract is absent.
 
-- [ ] Step 3: Register the dedicated service/session registry and MCP tools in tools/interview_mcp.py. Return only scenario-specific public session data, keep error handling consistent with existing tools, and never expose internal JSON arguments to the candidate.
+- [x] Step 3: Register the dedicated service/session registry and MCP tools in tools/interview_mcp.py. Return only scenario-specific public session data, keep error handling consistent with existing tools, and never expose internal JSON arguments to the candidate.
 
-- [ ] Step 4: Run python -m pytest tests/test_technical_interview_workflow.py tests/test_voice_interview_workflow.py -q and confirm new and existing voice workflows pass.
+- [x] Step 4: Run python -m pytest tests/test_technical_interview_workflow.py tests/test_voice_interview_workflow.py -q and confirm new and existing voice workflows pass.
 
-- [ ] Step 5: Commit the MCP workflow and tests as [feat] expose technical interview through MCP.
+- [x] Step 5: Commit the MCP workflow and tests as [feat] expose technical interview through MCP.
 
 ### Task 3: Voice skill and entry-point documentation
 
@@ -91,11 +91,11 @@
 - It asks stack-specific internals questions, one at a time, and adapts follow-ups. It must not reveal hidden scoring criteria or ideal answers.
 - README shows how to start the new skill alongside the existing two scenario skills.
 
-- [ ] Step 1: Add skill contract assertions for the order (calibrate, assess, stack, deep dive, report), Codex Voice requirement, arbitrary stack support, one-question-at-a-time rule, evidence-only report, early-stop behavior, and cancellation/deletion. Confirm the assertions fail before the skill exists.
+- [x] Step 1: Add skill contract assertions for the order (calibrate, assess, stack, deep dive, report), Codex Voice requirement, arbitrary stack support, one-question-at-a-time rule, evidence-only report, early-stop behavior, and cancellation/deletion. Confirm the assertions fail before the skill exists.
 
-- [ ] Step 2: Write the skill with exact MCP sequencing, retry behavior for saved answers, user-language reporting, and explicit practice-feedback framing; add the README entry point.
+- [x] Step 2: Write the skill with exact MCP sequencing, retry behavior for saved answers, user-language reporting, and explicit practice-feedback framing; add the README entry point.
 
-- [ ] Step 3: Run the skill contract test with python -m pytest tests/test_technical_interview_workflow.py -q and confirm it passes.
+- [x] Step 3: Run the skill contract test with python -m pytest tests/test_technical_interview_workflow.py -q and confirm it passes.
 
 - [ ] Step 4: Commit the voice skill and documentation as [feat] add technical interview voice skill.
 
