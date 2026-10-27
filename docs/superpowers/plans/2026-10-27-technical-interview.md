@@ -107,6 +107,6 @@
 **Interfaces:**
 - No new interfaces. Existing Backend Screening and test-interview contracts remain unchanged.
 
-- [ ] Step 1: Run python -m pytest and confirm the full existing and new suite passes.
-- [ ] Step 2: Review git diff origin/main...HEAD for unrelated files, leaked candidate data, missing report citations, or changes to existing scenario behavior.
-- [ ] Step 3: Confirm the active branch is left-try/feature/technical-interview and report the test result and any remaining limitations.
+- [x] Step 1: Run python -m pytest and confirm the full existing and new suite passes (170 passed).
+- [x] Step 2: Review git diff origin/main...HEAD for unrelated files, leaked candidate data, missing report citations, or changes to existing scenario behavior; fix evidence and Markdown injection issues.
+- [x] Step 3: Confirm the active branch is left-try/feature/technical-interview; report the test result and remaining limitations.
