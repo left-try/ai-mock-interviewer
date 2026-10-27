@@ -25,6 +25,7 @@ from mock_interviewer.scenarios import level_label, normalize_level
 from mock_interviewer.test_profile import SYNTHETIC_BACKEND_PROFILES
 from mock_interviewer.test_run_log import TestRunLog, default_test_runs_dir
 from mock_interviewer.test_run_summary import summarize_events
+from mock_interviewer.technical_interview import TechnicalInterviewService
 
 
 class HostProposalModel:
@@ -53,6 +54,7 @@ class HostProposalModel:
 
 
 _sessions: dict[str, tuple[InterviewService, HostProposalModel]] = {}
+_technical_sessions: dict[str, TechnicalInterviewService] = {}
 _sessions_lock = threading.RLock()
 REPORTS_DIR = default_reports_dir()
 TEST_RUNS_DIR = default_test_runs_dir()
@@ -759,6 +761,284 @@ def clear_test_run_logs() -> dict:
         return {"ok": True, "deleted_logs": deleted}
     except OSError as exc:
         return {"ok": False, "error": f"Could not clear test-run logs: {exc}"}
+
+
+def _public_technical_turn(turn):
+    return {
+        "id": turn.id,
+        "role": turn.role,
+        "text": turn.text,
+        "phase": turn.phase,
+        "topic_id": turn.topic_id,
+        "kind": turn.kind,
+    }
+
+
+def _public_technical_session(session, *, include_transcript=True):
+    result = {
+        "session_id": session.id,
+        "status": session.status,
+        "phase": session.phase,
+        "estimated_level": session.estimated_level,
+        "stack": session.stack,
+        "report": session.report,
+        "version": session.version,
+    }
+    if include_transcript:
+        result["turns"] = [_public_technical_turn(turn) for turn in session.turns]
+    return result
+
+
+def _technical_latest_turns(session):
+    candidate = next((turn for turn in reversed(session.turns) if turn.role == "candidate"), None)
+    latest = session.turns[-1] if session.turns else None
+    return {
+        "candidate_turn": None if candidate is None else _public_technical_turn(candidate),
+        "next_turn": (
+            _public_technical_turn(latest)
+            if latest is not None and latest.role == "interviewer"
+            else None
+        ),
+    }
+
+
+@mcp.tool()
+async def start_technical_interview(first_turn_json: str) -> dict:
+    """Start a voice technical interview with the first calibration question."""
+    try:
+        first_turn = _decode(first_turn_json, "first_turn_json")
+        service = TechnicalInterviewService()
+        session = await service.start(first_turn=first_turn)
+        with _sessions_lock:
+            _technical_sessions[session.id] = service
+        opening = (
+            "Здравствуйте! Это тренировочное техническое интервью. Сначала я задам несколько общих "
+            "вопросов, чтобы определить примерный уровень. Затем вы выберете стек, и мы разберём его "
+            f"внутреннее устройство. Начнём: {session.turns[-1].text}"
+        )
+        return {
+            "ok": True,
+            **_public_technical_session(session),
+            "opening_script": opening,
+            "next_action": "ask_next_question",
+            "instruction": (
+                "Speak opening_script once; it already includes the first question. Ask only one "
+                "question at a time. After each finalized answer, call record_technical_interview_answer "
+                "once with its exact transcript, a fresh event_id, and one next_turn_json. The service "
+                "saves the answer before validating the proposal. If answer_saved is true and the "
+                "proposal failed, retry the same tool with the same transcript and event_id and only "
+                "a corrected next_turn_json. When next_action is select_stack, ask the candidate to "
+                "name or choose any backend stack, then call select_technical_stack."
+            ),
+        }
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def record_technical_interview_answer(
+    session_id: str,
+    transcript: str,
+    event_id: str,
+    next_turn_json: str = "",
+    finish_after_answer: bool = False,
+) -> dict:
+    """Save one candidate answer and validate its next technical question."""
+    answer_saved = False
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.get(session_id)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        previous = await service.get_session(session_id)
+        duplicate = event_id in previous.answer_payloads
+        saved = await service.persist_answer(
+            session_id,
+            transcript,
+            event_id=event_id,
+            finish_after_answer=finish_after_answer,
+        )
+        answer_saved = not duplicate
+
+        if saved.status == "awaiting_report":
+            result = {
+                "ok": True,
+                "status": saved.status,
+                "next_action": "finish_interview",
+                "instruction": "Do not ask another question. Prepare and validate the evidence-based report.",
+            }
+        elif saved.phase == "stack_selection":
+            result = {
+                "ok": True,
+                "status": saved.status,
+                "next_action": "select_stack",
+                "instruction": "Calibration is complete. Ask the candidate to name or choose any backend stack.",
+            }
+        elif saved.pending_answer_event_id == event_id:
+            if not next_turn_json:
+                return {
+                    "ok": False,
+                    "answer_saved": True,
+                    "answer_event_id": event_id,
+                    "next_action": "propose_next_turn",
+                    "error": "The answer is saved; next_turn_json is required to continue.",
+                }
+            try:
+                proposal = _decode(next_turn_json, "next_turn_json")
+                saved = await service.propose_next_turn(
+                    session_id,
+                    event_id=event_id,
+                    proposal=proposal,
+                )
+            except (InterviewError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "answer_saved": True,
+                    "answer_event_id": event_id,
+                    "next_action": "propose_next_turn",
+                    "error": str(exc),
+                    "instruction": "The answer is saved. Retry only this proposal with the same event_id.",
+                }
+            result = {
+                "ok": True,
+                "status": saved.status,
+                "next_action": "ask_next_question",
+                "instruction": "Ask only the returned next_turn exactly once.",
+            }
+        else:
+            result = {
+                "ok": True,
+                "duplicate": duplicate,
+                "status": saved.status,
+                "next_action": (
+                    "select_stack"
+                    if saved.phase == "stack_selection"
+                    else "finish_interview"
+                    if saved.status != "active"
+                    else "ask_next_question"
+                ),
+            }
+        result.update(_public_technical_session(saved))
+        result.update(_technical_latest_turns(saved))
+        if result.get("next_action") != "ask_next_question":
+            result["next_turn"] = None
+        if answer_saved:
+            result["answer_saved"] = True
+            result["answer_event_id"] = event_id
+        return result
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "answer_saved": answer_saved, "error": str(exc)}
+
+
+@mcp.tool()
+async def select_technical_stack(
+    session_id: str,
+    stack: str,
+    event_id: str,
+    first_turn_json: str,
+) -> dict:
+    """Persist the selected stack and start its evidence-driven deep dive."""
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.get(session_id)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        saved = await service.select_stack(session_id, stack, event_id=event_id)
+        try:
+            proposal = _decode(first_turn_json, "first_turn_json")
+            saved = await service.propose_next_turn(
+                session_id,
+                event_id=event_id,
+                proposal=proposal,
+            )
+        except (InterviewError, ValueError) as exc:
+            return {
+                "ok": False,
+                "answer_saved": True,
+                "answer_event_id": event_id,
+                "stack": saved.stack,
+                "next_action": "propose_next_turn",
+                "error": str(exc),
+                "instruction": "The stack selection is saved. Retry with the same stack and event_id, correcting only the question proposal.",
+            }
+        return {
+            "ok": True,
+            **_public_technical_session(saved),
+            **_technical_latest_turns(saved),
+            "next_action": "ask_next_question",
+            "instruction": "Ask only the returned next_turn exactly once.",
+        }
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def technical_interview_status(session_id: str) -> dict:
+    """Read the saved transcript and state of a technical interview."""
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.get(session_id)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        return {"ok": True, **_public_technical_session(await service.get_session(session_id))}
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def finish_technical_interview(session_id: str, report_json: str) -> dict:
+    """Validate and render the evidence-based technical interview report."""
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.get(session_id)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        report = _decode(report_json, "report_json")
+        session = await service.finish(session_id, report=report)
+        return {
+            "ok": True,
+            **_public_technical_session(session, include_transcript=False),
+            "interview_complete": session.status == "completed",
+            "report_markdown": service.render_report_markdown(session),
+            "instruction": (
+                "Announce completion only after this tool succeeds. Display the complete "
+                "report_markdown visibly in the chat. State that this is practice feedback, "
+                "not a hiring decision, and explain if evidence was insufficient."
+            ),
+        }
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def cancel_technical_interview(session_id: str) -> dict:
+    """Cancel and discard an active technical interview."""
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.get(session_id)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        session = await service.cancel(session_id)
+        await service.delete(session_id)
+        with _sessions_lock:
+            _technical_sessions.pop(session_id, None)
+        return {"ok": True, "status": session.status, "deleted": True}
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def delete_technical_interview(session_id: str) -> dict:
+    """Permanently delete a technical interview transcript and report."""
+    try:
+        with _sessions_lock:
+            service = _technical_sessions.pop(session_id, None)
+        if service is None:
+            raise ValueError("Technical interview session was not found")
+        await service.delete(session_id)
+        return {"ok": True, "deleted": True}
+    except (InterviewError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 if __name__ == "__main__":

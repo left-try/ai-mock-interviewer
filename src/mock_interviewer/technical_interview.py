@@ -146,14 +146,8 @@ class TechnicalInterviewService:
         session = self._require(session_id)
         async with self._locks[session_id]:
             session = self._require(session_id)
-            if session.status != "active" or session.phase != "stack_selection":
-                raise InvalidSessionTransition("The interview is not waiting for a stack selection.")
             self._validate_event_id(event_id)
             clean = stack.strip() if isinstance(stack, str) else ""
-            if not clean:
-                raise ValueError("stack must not be blank")
-            if len(clean) > MAX_STACK_CHARS:
-                raise ValueError(f"stack exceeds the {MAX_STACK_CHARS} character limit")
             prior = session.answer_payloads.get(event_id)
             if prior is not None:
                 if prior != clean:
@@ -161,6 +155,12 @@ class TechnicalInterviewService:
                         "An event_id cannot be reused for different answer text."
                     )
                 return self._copy(session)
+            if session.status != "active" or session.phase != "stack_selection":
+                raise InvalidSessionTransition("The interview is not waiting for a stack selection.")
+            if not clean:
+                raise ValueError("stack must not be blank")
+            if len(clean) > MAX_STACK_CHARS:
+                raise ValueError(f"stack exceeds the {MAX_STACK_CHARS} character limit")
             session.stack = clean
             session.answer_payloads[event_id] = clean
             session.turns.append(TechnicalTurn(
@@ -408,34 +408,53 @@ class TechnicalInterviewService:
         report = session.report
         if report is None:
             raise InvalidSessionTransition("The interview report is not available yet.")
-        level = report["estimated_level"] or "Недостаточно данных"
-        score_labels = {
-            "technical_fundamentals": "Технические основы",
-            "runtime_and_execution": "Выполнение и runtime",
-            "concurrency_and_memory": "Конкурентность и память",
-            "stack_internals": "Внутреннее устройство стека",
-            "practical_reasoning": "Практическое рассуждение",
+        candidate_text = " ".join(turn.text for turn in session.turns if turn.role == "candidate")
+        cyrillic = sum("\u0400" <= char <= "\u04ff" for char in candidate_text)
+        latin = sum(char.isascii() and char.isalpha() for char in candidate_text)
+        russian = cyrillic > latin
+        labels = {
+            "technical_fundamentals": ("Технические основы", "Technical fundamentals"),
+            "runtime_and_execution": ("Выполнение и runtime", "Runtime and execution"),
+            "concurrency_and_memory": ("Конкурентность и память", "Concurrency and memory"),
+            "stack_internals": ("Внутреннее устройство стека", "Stack internals"),
+            "practical_reasoning": ("Практическое рассуждение", "Practical reasoning"),
         }
+        labels_by_key = {key: value[0 if russian else 1] for key, value in labels.items()}
+        level = report["estimated_level"] or ("Недостаточно данных" if russian else "Insufficient data")
+        confidence = report["confidence"]
         scores = "\n".join(
-            f"- {score_labels[key]}: {value if value is not None else 'недостаточно данных'}"
+            f"- {labels_by_key[key]}: {value if value is not None else ('недостаточно данных' if russian else 'insufficient data')}"
             for key, value in report["scores"].items()
         )
         evidence = "\n".join(
-            f"- «{item['quote']}» — {item['criterion_id']} (turn {item['turn_id']})"
+            f"- {item['quote']!r} — {labels_by_key[item['criterion_id']]} ({item['turn_id']})"
             for item in report["evidence"]
-        ) or "- Недостаточно ответов для подтверждённой оценки."
-        strengths = "\n".join(f"- {item}" for item in report["strengths"]) or "- Нет достаточных данных."
-        growth = "\n".join(f"- {item}" for item in report["growth_areas"]) or "- Нет достаточных данных."
-        uncertainties = "\n".join(f"- {item}" for item in report["uncertainties"]) or "- Нет."
+        ) or ("- Недостаточно ответов для подтверждённой оценки." if russian else "- Not enough answers for a supported assessment.")
+        strengths = "\n".join(f"- {item}" for item in report["strengths"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
+        growth = "\n".join(f"- {item}" for item in report["growth_areas"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
+        uncertainties = "\n".join(f"- {item}" for item in report["uncertainties"]) or ("- Нет." if russian else "- None.")
+        if russian:
+            return (
+                "# Отчёт технического интервью\n\n"
+                f"**Стек:** {session.stack or 'не выбран'}  \n"
+                f"**Оценённый уровень:** {level}  \n"
+                f"**Уверенность:** {confidence}\n\n"
+                f"## Оценка\n{scores}\n\n"
+                f"## Сильные стороны\n{strengths}\n\n"
+                f"## Зоны роста\n{growth}\n\n"
+                f"## Свидетельства из ответов\n{evidence}\n\n"
+                f"## Неопределённость\n{uncertainties}\n\n"
+                f"_{report['disclaimer']}_"
+            )
         return (
-            "# Отчёт технического интервью\n\n"
-            f"**Стек:** {session.stack or 'не выбран'}  \n"
-            f"**Оценённый уровень:** {level}  \n"
-            f"**Уверенность:** {report['confidence']}\n\n"
-            f"## Оценка\n{scores}\n\n"
-            f"## Сильные стороны\n{strengths}\n\n"
-            f"## Зоны роста\n{growth}\n\n"
-            f"## Свидетельства из ответов\n{evidence}\n\n"
-            f"## Неопределённость\n{uncertainties}\n\n"
+            "# Technical interview report\n\n"
+            f"**Stack:** {session.stack or 'not selected'}  \n"
+            f"**Estimated level:** {level}  \n"
+            f"**Confidence:** {confidence}\n\n"
+            f"## Scores\n{scores}\n\n"
+            f"## Strengths\n{strengths}\n\n"
+            f"## Growth areas\n{growth}\n\n"
+            f"## Evidence from answers\n{evidence}\n\n"
+            f"## Uncertainties\n{uncertainties}\n\n"
             f"_{report['disclaimer']}_"
         )
