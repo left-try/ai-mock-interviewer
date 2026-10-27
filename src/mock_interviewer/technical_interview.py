@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any
 
 from .errors import InvalidReport, InvalidSessionTransition, SessionNotFound
 
 
-PHASES = {"calibration", "stack_selection", "deep_dive", "wrap_up"}
 LEVELS = {"internship", "junior", "middle"}
 TURN_KINDS = {"question", "follow_up", "repeat"}
 CALIBRATION_TOPICS = {
@@ -72,7 +72,6 @@ class TechnicalInterviewSession:
 class TechnicalInterviewService:
     """In-memory sessions with answer-first writes and evidence-checked reports."""
 
-    DISCLAIMER = "Учебная обратная связь для практики; это не решение о найме."
     def __init__(self):
         self._sessions: dict[str, TechnicalInterviewSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -348,7 +347,11 @@ class TechnicalInterviewService:
         evidence = report.get("evidence")
         if not isinstance(evidence, list):
             raise InvalidReport("evidence must be a list")
-        candidate_turns = {turn.id: turn for turn in session.turns if turn.role == "candidate"}
+        candidate_turns = {
+            turn.id: turn
+            for turn in session.turns
+            if turn.role == "candidate" and turn.phase in {"calibration", "deep_dive"}
+        }
         supported: dict[str, set[str]] = {criterion: set() for criterion in REPORT_CRITERIA}
         clean_evidence = []
         for item in evidence:
@@ -404,6 +407,11 @@ class TechnicalInterviewService:
         }
 
     @staticmethod
+    def _escape_markdown(value: str) -> str:
+        flattened = value.replace("\r", " ").replace("\n", " ")
+        return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>])", r"\\\1", flattened)
+
+    @staticmethod
     def render_report_markdown(session: TechnicalInterviewSession) -> str:
         report = session.report
         if report is None:
@@ -427,16 +435,17 @@ class TechnicalInterviewService:
             for key, value in report["scores"].items()
         )
         evidence = "\n".join(
-            f"- {item['quote']!r} — {labels_by_key[item['criterion_id']]} ({item['turn_id']})"
+            f"- «{TechnicalInterviewService._escape_markdown(item['quote'])}» — "
+            f"{labels_by_key[item['criterion_id']]} ({item['turn_id']})"
             for item in report["evidence"]
         ) or ("- Недостаточно ответов для подтверждённой оценки." if russian else "- Not enough answers for a supported assessment.")
-        strengths = "\n".join(f"- {item}" for item in report["strengths"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
-        growth = "\n".join(f"- {item}" for item in report["growth_areas"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
-        uncertainties = "\n".join(f"- {item}" for item in report["uncertainties"]) or ("- Нет." if russian else "- None.")
+        strengths = "\n".join(f"- {TechnicalInterviewService._escape_markdown(item)}" for item in report["strengths"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
+        growth = "\n".join(f"- {TechnicalInterviewService._escape_markdown(item)}" for item in report["growth_areas"]) or ("- Нет достаточных данных." if russian else "- Not enough evidence.")
+        uncertainties = "\n".join(f"- {TechnicalInterviewService._escape_markdown(item)}" for item in report["uncertainties"]) or ("- Нет." if russian else "- None.")
         if russian:
             return (
                 "# Отчёт технического интервью\n\n"
-                f"**Стек:** {session.stack or 'не выбран'}  \n"
+                f"**Стек:** {TechnicalInterviewService._escape_markdown(session.stack) if session.stack else 'не выбран'}  \n"
                 f"**Оценённый уровень:** {level}  \n"
                 f"**Уверенность:** {confidence}\n\n"
                 f"## Оценка\n{scores}\n\n"
@@ -444,11 +453,11 @@ class TechnicalInterviewService:
                 f"## Зоны роста\n{growth}\n\n"
                 f"## Свидетельства из ответов\n{evidence}\n\n"
                 f"## Неопределённость\n{uncertainties}\n\n"
-                f"_{report['disclaimer']}_"
+                f"_{TechnicalInterviewService._escape_markdown(report['disclaimer'])}_"
             )
         return (
             "# Technical interview report\n\n"
-            f"**Stack:** {session.stack or 'not selected'}  \n"
+            f"**Stack:** {TechnicalInterviewService._escape_markdown(session.stack) if session.stack else 'not selected'}  \n"
             f"**Estimated level:** {level}  \n"
             f"**Confidence:** {confidence}\n\n"
             f"## Scores\n{scores}\n\n"
@@ -456,5 +465,5 @@ class TechnicalInterviewService:
             f"## Growth areas\n{growth}\n\n"
             f"## Evidence from answers\n{evidence}\n\n"
             f"## Uncertainties\n{uncertainties}\n\n"
-            f"_{report['disclaimer']}_"
+            f"_{TechnicalInterviewService._escape_markdown(report['disclaimer'])}_"
         )

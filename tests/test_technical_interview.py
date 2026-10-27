@@ -199,6 +199,64 @@ async def test_report_rejects_fabricated_quote():
 
 
 @pytest.mark.asyncio
+async def test_report_cannot_score_from_stack_selection_alone():
+    service = TechnicalInterviewService()
+    session = await calibrated_session(service)
+    session = await service.select_stack(session.id, "Python", event_id="stack-1")
+    stack_turn = next(turn for turn in session.turns if turn.topic_id == "stack_selection")
+    session = await service.propose_next_turn(
+        session.id,
+        event_id="stack-1",
+        proposal=question("runtime_and_memory", phase="deep_dive"),
+    )
+    session = await service.persist_answer(
+        session.id,
+        "The runtime manages objects on a heap.",
+        event_id="deep-1",
+        finish_after_answer=True,
+    )
+    proposal = report_for(session)
+    proposal["scores"]["stack_internals"] = 3
+    proposal["evidence"].append({
+        "turn_id": stack_turn.id,
+        "quote": "Python",
+        "criterion_id": "stack_internals",
+    })
+    with pytest.raises(InvalidReport, match="candidate answer"):
+        await service.finish(session.id, report=proposal)
+
+
+@pytest.mark.asyncio
+async def test_report_escapes_stack_and_candidate_markdown():
+    service = TechnicalInterviewService()
+    session = await calibrated_session(service)
+    session = await service.select_stack(session.id, "Python\n## forged heading", event_id="stack-1")
+    session = await service.propose_next_turn(
+        session.id,
+        event_id="stack-1",
+        proposal=question("runtime_and_memory", phase="deep_dive"),
+    )
+    session = await service.persist_answer(
+        session.id,
+        "I can use [fake](https://example.test).",
+        event_id="deep-1",
+        finish_after_answer=True,
+    )
+    proposal = report_for(session)
+    deep_turn = next(turn for turn in session.turns if turn.role == "candidate" and turn.text.startswith("I can use"))
+    proposal["scores"]["practical_reasoning"] = 3
+    proposal["evidence"].append({
+        "turn_id": deep_turn.id,
+        "quote": "[fake](https://example.test)",
+        "criterion_id": "practical_reasoning",
+    })
+    completed = await service.finish(session.id, report=proposal)
+    markdown = service.render_report_markdown(completed)
+    assert "## forged heading" not in markdown
+    assert "[fake](https://example.test)" not in markdown
+
+
+@pytest.mark.asyncio
 async def test_cancel_and_delete_clear_session():
     service = TechnicalInterviewService()
     session = await service.start(first_turn=question("programming_fundamentals"))
