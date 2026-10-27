@@ -97,7 +97,7 @@
 
 - [x] Step 3: Run the skill contract test with python -m pytest tests/test_technical_interview_workflow.py -q and confirm it passes.
 
-- [ ] Step 4: Commit the voice skill and documentation as [feat] add technical interview voice skill.
+- [x] Step 4: Commit the voice skill and documentation as [feat] add technical interview voice skill.
 
 ### Task 4: Full regression and final review
 

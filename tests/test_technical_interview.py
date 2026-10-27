@@ -170,7 +170,7 @@ async def test_report_accepts_supported_level_and_renders_evidence():
     )
     completed = await service.finish(session.id, report=report_for(session))
     markdown = service.render_report_markdown(completed)
-    assert "Оценённый уровень:** junior" in markdown
+    assert "Estimated level:** junior" in markdown
     assert "answer 0" in markdown
 
 
