@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>System design whiteboard probe</title>
+  <style>
+    :root { color-scheme: light; font: 15px/1.4 system-ui, sans-serif; color: #172033; background: #f3f5f8; }
+    body { margin: 0; padding: 24px; }
+    main { max-width: 1120px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .notice { color: #754c00; background: #fff3cf; border: 1px solid #e6ca78; padding: 10px 12px; border-radius: 8px; margin: 14px 0; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+    button, input { font: inherit; padding: 8px 10px; border: 1px solid #b8c1cf; border-radius: 6px; background: white; }
+    button { cursor: pointer; }
+    button.active { background: #183b66; color: white; border-color: #183b66; }
+    input { width: 170px; }
+    #status { min-height: 22px; color: #526074; }
+    svg { width: 100%; height: min(66vh, 650px); display: block; background: white; border: 1px solid #c7cfdb; border-radius: 8px; touch-action: none; }
+    .edge { stroke: #526074; stroke-width: 2; marker-end: url(#arrow); cursor: pointer; }
+    .node rect { fill: #edf4ff; stroke: #426b9b; stroke-width: 2; rx: 9; cursor: grab; }
+    .node text { text-anchor: middle; dominant-baseline: middle; pointer-events: none; fill: #14243a; }
+    .node.selected rect { stroke: #d26a12; stroke-width: 3; }
+    footer { margin-top: 8px; color: #5d6878; font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>System design whiteboard probe</h1>
+  <p>Local prototype for testing structured board events alongside an interview.</p>
+  <div class="notice">Synthetic demo only. Do not enter personal or confidential information. This page records explicit canvas actions; it does not inspect other tabs or capture your screen.</div>
+  <div class="toolbar">
+    <label for="session">Session</label><input id="session" value="demo-session" maxlength="64">
+    <label for="label">Service</label><input id="label" value="Service" maxlength="200">
+    <button id="load">Load session</button>
+    <button id="add">Add service</button>
+    <button id="rename">Rename selected</button>
+    <button id="connect">Connect two services</button>
+    <button id="delete">Delete selected</button>
+  </div>
+  <div id="status" role="status" aria-live="polite">Loading local session…</div>
+  <svg id="board" viewBox="0 0 1000 620" aria-label="System design canvas">
+    <defs><marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#526074"></path></marker></defs>
+    <g id="edges"></g><g id="nodes"></g>
+  </svg>
+  <footer>Select a node, edit its name in the Service field, and choose Rename selected. Drag to move. In connect mode, select two nodes. Select an item and press Delete or use the button.</footer>
+</main>
+<script>
+(() => {
+  const svg = document.querySelector('#board');
+  const nodesLayer = document.querySelector('#nodes');
+  const edgesLayer = document.querySelector('#edges');
+  const status = document.querySelector('#status');
+  const sessionInput = document.querySelector('#session');
+  const state = { nodes: new Map(), edges: new Map(), sequence: 0, cursor: 0, selected: null, connect: false, connectFrom: null, drag: null };
+  const id = () => crypto.randomUUID();
+  const point = (event) => {
+    const p = svg.createSVGPoint(); p.x = event.clientX; p.y = event.clientY;
+    return p.matrixTransform(svg.getScreenCTM().inverse());
+  };
+  const center = (node) => ({ x: node.x + 70, y: node.y + 26 });
+
+  async function emit(kind, payload) {
+    const clientSequence = state.sequence + 1;
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionInput.value.trim())}/events`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_id: id(), client_sequence: clientSequence, kind, payload })
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    state.sequence = clientSequence;
+    state.cursor = body.sequence;
+    status.textContent = `Saved ${kind} as ${body.event_id} (event ${body.sequence}).`;
+    return body;
+  }
+
+  function apply(event) {
+    const p = event.payload;
+    if (event.kind === 'node_added') state.nodes.set(p.node_id, { id: p.node_id, label: p.label, x: p.x ?? 100, y: p.y ?? 100 });
+    if (event.kind === 'node_updated' && state.nodes.has(p.node_id)) state.nodes.get(p.node_id).label = p.label;
+    if (event.kind === 'node_moved' && state.nodes.has(p.node_id)) Object.assign(state.nodes.get(p.node_id), { x: p.x, y: p.y });
+    if (event.kind === 'node_deleted') state.nodes.delete(p.node_id);
+    if (event.kind === 'edge_added') state.edges.set(p.edge_id, { id: p.edge_id, source: p.source_id, target: p.target_id });
+    if (event.kind === 'edge_deleted') state.edges.delete(p.edge_id);
+    state.cursor = Math.max(state.cursor, event.sequence);
+    state.sequence = Math.max(state.sequence, event.client_sequence);
+    render();
+  }
+
+  function render() {
+    edgesLayer.replaceChildren(); nodesLayer.replaceChildren();
+    for (const edge of state.edges.values()) {
+      const a = state.nodes.get(edge.source), b = state.nodes.get(edge.target);
+      if (!a || !b) continue;
+      const from = center(a), to = center(b), line = document.createElementNS(svg.namespaceURI, 'line');
+      line.setAttribute('x1', from.x); line.setAttribute('y1', from.y); line.setAttribute('x2', to.x); line.setAttribute('y2', to.y);
+      line.setAttribute('class', 'edge'); line.dataset.id = edge.id;
+      line.addEventListener('click', (event) => { event.stopPropagation(); state.selected = { type: 'edge', id: edge.id }; render(); });
+      if (state.selected?.type === 'edge' && state.selected.id === edge.id) line.setAttribute('stroke', '#d26a12');
+      edgesLayer.append(line);
+    }
+    for (const node of state.nodes.values()) {
+      const group = document.createElementNS(svg.namespaceURI, 'g'); group.setAttribute('class', `node${state.selected?.id === node.id ? ' selected' : ''}`); group.dataset.id = node.id;
+      const rect = document.createElementNS(svg.namespaceURI, 'rect'); rect.setAttribute('x', node.x); rect.setAttribute('y', node.y); rect.setAttribute('width', '140'); rect.setAttribute('height', '52');
+      const label = document.createElementNS(svg.namespaceURI, 'text'); label.setAttribute('x', node.x + 70); label.setAttribute('y', node.y + 26); label.textContent = node.label;
+      group.append(rect, label);
+      group.addEventListener('pointerdown', (event) => {
+        event.stopPropagation(); state.selected = { type: 'node', id: node.id };
+        if (state.connect) { chooseConnection(node.id); return; }
+        const p = point(event); state.drag = { id: node.id, dx: p.x - node.x, dy: p.y - node.y, startX: node.x, startY: node.y };
+        group.classList.add('selected'); group.setPointerCapture(event.pointerId);
+      });
+      group.addEventListener('pointermove', (event) => {
+        if (!state.drag || state.drag.id !== node.id) return;
+        const p = point(event); node.x = Math.round(p.x - state.drag.dx); node.y = Math.round(p.y - state.drag.dy);
+        group.setAttribute('transform', `translate(${node.x - state.drag.startX} ${node.y - state.drag.startY})`);
+        for (const edge of state.edges.values()) {
+          const line = edgesLayer.querySelector(`[data-id="${edge.id}"]`);
+          const source = state.nodes.get(edge.source), target = state.nodes.get(edge.target);
+          if (!line || !source || !target) continue;
+          const from = center(source), to = center(target);
+          line.setAttribute('x1', from.x); line.setAttribute('y1', from.y); line.setAttribute('x2', to.x); line.setAttribute('y2', to.y);
+        }
+      });
+      group.addEventListener('pointerup', async () => {
+        if (!state.drag || state.drag.id !== node.id) return;
+        state.drag = null;
+        render();
+        try { await emit('node_moved', { node_id: node.id, x: node.x, y: node.y }); } catch (error) { status.textContent = `Not saved: ${error.message}`; }
+      });
+      nodesLayer.append(group);
+    }
+  }
+
+  async function chooseConnection(nodeId) {
+    if (!state.connectFrom) { state.connectFrom = nodeId; status.textContent = 'Select the destination service.'; return; }
+    if (state.connectFrom === nodeId) { status.textContent = 'Choose a different destination.'; return; }
+    const source = state.connectFrom; state.connectFrom = null; state.connect = false; document.querySelector('#connect').classList.remove('active');
+    const edge = { edge_id: id(), source_id: source, target_id: nodeId };
+    try { const saved = await emit('edge_added', edge); apply(saved); } catch (error) { status.textContent = `Not saved: ${error.message}`; }
+  }
+
+  async function load() {
+    state.nodes.clear(); state.edges.clear(); state.sequence = 0; state.cursor = 0; state.selected = null;
+    const name = sessionInput.value.trim();
+    const response = await fetch(`/api/sessions/${encodeURIComponent(name)}/events?after_cursor=0`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    for (const event of result.events) apply(event);
+    status.textContent = `Loaded ${result.events.length} events; cursor ${result.next_cursor}.`;
+  }
+
+  document.querySelector('#load').addEventListener('click', () => load().catch(error => status.textContent = error.message));
+  document.querySelector('#add').addEventListener('click', async () => {
+    const label = document.querySelector('#label').value.trim(); if (!label) return;
+    const nodeId = id(), index = state.nodes.size;
+    try { const saved = await emit('node_added', { node_id: nodeId, label: label.trim(), x: 90 + (index % 4) * 190, y: 90 + Math.floor(index / 4) * 100 }); apply(saved); }
+    catch (error) { status.textContent = `Not saved: ${error.message}`; }
+  });
+  document.querySelector('#rename').addEventListener('click', async () => {
+    if (state.selected?.type !== 'node') { status.textContent = 'Select a service to rename it.'; return; }
+    const node = state.nodes.get(state.selected.id), label = document.querySelector('#label').value.trim();
+    if (!node || !label) return;
+    try { const saved = await emit('node_updated', { node_id: node.id, label }); apply(saved); }
+    catch (error) { status.textContent = `Not saved: ${error.message}`; }
+  });
+  document.querySelector('#connect').addEventListener('click', (event) => {
+    state.connect = !state.connect; state.connectFrom = null; event.currentTarget.classList.toggle('active', state.connect);
+    status.textContent = state.connect ? 'Select the source service.' : 'Connection mode off.';
+  });
+  document.querySelector('#delete').addEventListener('click', async () => {
+    if (!state.selected) return;
+    try {
+      if (state.selected.type === 'node') {
+        const nodeId = state.selected.id;
+        for (const edge of [...state.edges.values()].filter(edge => edge.source === nodeId || edge.target === nodeId)) {
+          const saved = await emit('edge_deleted', { edge_id: edge.id }); apply(saved);
+        }
+        const saved = await emit('node_deleted', { node_id: nodeId }); apply(saved);
+      } else {
+        const saved = await emit('edge_deleted', { edge_id: state.selected.id }); apply(saved);
+      }
+      state.selected = null; render();
+    } catch (error) { status.textContent = `Not saved: ${error.message}`; }
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Delete' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) document.querySelector('#delete').click(); });
+  load().catch(error => status.textContent = error.message);
+})();
+</script>
+</body>
+</html>
